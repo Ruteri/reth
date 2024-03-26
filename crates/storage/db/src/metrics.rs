@@ -1,5 +1,6 @@
 use crate::Tables;
 use metrics::{Gauge, Histogram};
+#[cfg(feature = "mdbx")]
 use reth_libmdbx::CommitLatency;
 use reth_metrics::{metrics::Counter, Metrics};
 use rustc_hash::{FxHashMap, FxHasher};
@@ -123,6 +124,7 @@ impl DatabaseEnvMetrics {
             .record_open();
     }
 
+    #[cfg(feature = "mdbx")]
     /// Record metrics for closing a database transactions.
     pub(crate) fn record_closed_transaction(
         &self,
@@ -302,6 +304,7 @@ pub(crate) struct TransactionOutcomeMetrics {
 }
 
 impl TransactionOutcomeMetrics {
+    #[cfg(feature = "mdbx")]
     /// Record transaction closing with the duration it was open and the duration it took to close
     /// it.
     pub(crate) fn record(

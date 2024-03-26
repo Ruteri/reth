@@ -45,6 +45,7 @@ proptest = { workspace = true, optional = true }
 proptest-derive = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 once_cell.workspace = true
+rocksdb = "0.22.0"
 
 [dev-dependencies]
 # reth libs with arbitrary
@@ -71,8 +72,9 @@ paste = "1.0"
 assert_matches.workspace = true
 
 [features]
-default = ["mdbx"]
+default = []
 test-utils = ["tempfile", "arbitrary"]
+rocksdb = []
 mdbx = ["reth-libmdbx"]
 bench = []
 arbitrary = [

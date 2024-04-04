@@ -1,30 +1,9 @@
 use crate::{
-    common::PairResult,
-    cursor::{DbCursorRO, DbCursorRW, RangeWalker},
-    database::Database,
-    database_metrics::{DatabaseMetadata, DatabaseMetadataValue, DatabaseMetrics},
-    metrics::DatabaseEnvMetrics,
-    models::client_version::ClientVersion,
-    table::{self, Compress, Decode, DupSort, Encode, KeyFormat, Table, TableImporter},
-    tables::{self, utils::*, TableType, Tables},
-    transaction::{DbTx, DbTxMut},
-    utils::default_page_size,
-    DatabaseError,
+    table::{Decode, Encode, KeyFormat, Table},
+    tables::{self},
 };
-use eyre::Context;
-use metrics::{gauge, Label};
-use reth_interfaces::db::{DatabaseErrorInfo, LogLevel};
 
 use reth_primitives::BlockNumber;
-
-use reth_tracing::tracing::error;
-use std::{
-    fmt,
-    ops::Deref,
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
 
 impl
     KeyFormat<
@@ -77,9 +56,9 @@ impl
 {
     fn format_key(
         k: <tables::StorageChangeSets as Table>::Key,
-        v: &<tables::StorageChangeSets as Table>::Value,
+        _v: &<tables::StorageChangeSets as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
+        let primary_key: Vec<u8> = k.encode().as_ref().into();
         primary_key
     }
 
@@ -93,9 +72,9 @@ impl KeyFormat<<tables::HashedStorages as Table>::Key, <tables::HashedStorages a
 {
     fn format_key(
         k: <tables::HashedStorages as Table>::Key,
-        v: &<tables::HashedStorages as Table>::Value,
+        _v: &<tables::HashedStorages as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
+        let primary_key: Vec<u8> = k.encode().as_ref().into();
         primary_key
     }
 
@@ -109,9 +88,9 @@ impl KeyFormat<<tables::StoragesTrie as Table>::Key, <tables::StoragesTrie as Ta
 {
     fn format_key(
         k: <tables::HashedStorages as Table>::Key,
-        v: &<tables::StoragesTrie as Table>::Value,
+        _v: &<tables::StoragesTrie as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
+        let primary_key: Vec<u8> = k.encode().as_ref().into();
         primary_key
     }
 

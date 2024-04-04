@@ -4,9 +4,8 @@ use crate::{
         DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, DupWalker, RangeWalker,
         ReverseWalker, Walker,
     },
-    database::Database,
     reth_rocksdb,
-    table::{Compress, Decode, Decompress, DupSort, Encode, KeyFormat, Table, TableImporter},
+    table::{Decode, Decompress, DupSort, Encode, KeyFormat, Table},
     tables::utils::{decode_one, decoder},
     transaction::{DbTx, DbTxMut},
     DatabaseError,
@@ -16,10 +15,10 @@ use core::ops::Bound;
 use core::ops::Deref;
 use reth_interfaces::db::DatabaseErrorInfo;
 use reth_interfaces::db::{DatabaseWriteError, DatabaseWriteOperation};
-use std::borrow::Borrow;
+
 use std::borrow::Cow;
 use std::fmt;
-use std::{collections::BTreeMap, ops::RangeBounds};
+use std::ops::RangeBounds;
 
 use rocksdb;
 
@@ -474,7 +473,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
                     }
                     .into()),
                     Ok(None) => self.upsert(_key, _value),
-                    Ok(Some(item)) => self.append(_key, _value),
+                    Ok(Some(_item)) => self.append(_key, _value),
                 }
             }
             Some(ck) => {
@@ -528,7 +527,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                     }
                     .into()),
                     Ok(None) => self.upsert(_key, _value),
-                    Ok(Some(item)) => self.append_dup(_key, _value),
+                    Ok(Some(_item)) => self.append_dup(_key, _value),
                 }
             }
             Some(ck) => {

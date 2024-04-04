@@ -1,18 +1,15 @@
 //! Module that interacts with MDBX.
 
 use crate::{
-    common::PairResult,
-    cursor::{DbCursorRO, DbCursorRW, RangeWalker},
+    cursor::{DbCursorRO, DbCursorRW},
     database::Database,
     database_metrics::{DatabaseMetadata, DatabaseMetadataValue, DatabaseMetrics},
     metrics::DatabaseEnvMetrics,
     models::client_version::ClientVersion,
     tables::Tables,
     transaction::{DbTx, DbTxMut},
-    utils::default_page_size,
     DatabaseError,
 };
-use eyre::Context;
 use metrics::{gauge, Label};
 use reth_interfaces::db::{DatabaseErrorInfo, LogLevel};
 
@@ -24,31 +21,13 @@ pub struct RO;
 #[non_exhaustive]
 pub struct RW;
 
-use reth_tracing::tracing::error;
-use std::{
-    fmt,
-    ops::Deref,
-    path::Path,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::{fmt, path::Path, sync::Arc, time::Duration};
 
 pub mod cursor;
 pub mod dups;
 pub mod tx;
 
 use tx::Tx;
-
-const GIGABYTE: usize = 1024 * 1024 * 1024;
-const TERABYTE: usize = GIGABYTE * 1024;
-
-/// MDBX allows up to 32767 readers (`MDBX_READERS_LIMIT`), but we limit it to slightly below that
-const DEFAULT_MAX_READERS: u64 = 32_000;
-
-/// Space that a read-only transaction can occupy until the warning is emitted.
-/// See [reth_libmdbx::EnvironmentBuilder::set_handle_slow_readers] for more information.
-#[cfg(not(windows))]
-const MAX_SAFE_READER_SPACE: usize = 10 * GIGABYTE;
 
 /// Environment used when opening a MDBX environment. RO/RW.
 #[derive(Debug)]
@@ -71,41 +50,13 @@ pub struct DatabaseArguments {
     client_version: ClientVersion,
     /// Database log level. If [None], the default value is used.
     log_level: Option<LogLevel>,
-    /// Maximum duration of a read transaction. If [None], the default value is used.
-    max_read_transaction_duration: Option<MaxReadTransactionDuration>,
-    /// Open environment in exclusive/monopolistic mode. If [None], the default value is used.
-    ///
-    /// This can be used as a replacement for `MDB_NOLOCK`, which don't supported by MDBX. In this
-    /// way, you can get the minimal overhead, but with the correct multi-process and multi-thread
-    /// locking.
-    ///
-    /// If `true` = open environment in exclusive/monopolistic mode or return `MDBX_BUSY` if
-    /// environment already used by other process. The main feature of the exclusive mode is the
-    /// ability to open the environment placed on a network share.
-    ///
-    /// If `false` = open environment in cooperative mode, i.e. for multi-process
-    /// access/interaction/cooperation. The main requirements of the cooperative mode are:
-    /// - Data files MUST be placed in the LOCAL file system, but NOT on a network share.
-    /// - Environment MUST be opened only by LOCAL processes, but NOT over a network.
-    /// - OS kernel (i.e. file system and memory mapping implementation) and all processes that
-    ///   open the given environment MUST be running in the physically single RAM with
-    ///   cache-coherency. The only exception for cache-consistency requirement is Linux on MIPS
-    ///   architecture, but this case has not been tested for a long time).
-    ///
-    /// This flag affects only at environment opening but can't be changed after.
-    exclusive: Option<bool>,
 }
 
 impl DatabaseArguments {
     // See rocksdb.Options
     /// Create new database arguments with given client version.
     pub fn new(client_version: ClientVersion) -> Self {
-        Self {
-            client_version,
-            log_level: None,
-            max_read_transaction_duration: None,
-            exclusive: None,
-        }
+        Self { client_version, log_level: None }
     }
 
     /// Set the log level.
@@ -185,7 +136,7 @@ impl DatabaseMetrics for DatabaseEnv {
     }
 
     fn gauge_metrics(&self) -> Vec<(&'static str, f64, Vec<Label>)> {
-        let mut metrics = Vec::new();
+        let metrics = Vec::new();
 
         // See mdbx implementation
 
@@ -222,8 +173,8 @@ impl DatabaseEnv {
     /// It does not create the tables, for that call [`DatabaseEnv::create_tables`].
     pub fn open(
         path: &Path,
-        kind: DatabaseEnvKind,
-        args: DatabaseArguments,
+        _kind: DatabaseEnvKind,
+        _args: DatabaseArguments,
     ) -> Result<DatabaseEnv, DatabaseError> {
         let inner = rocksdb::TransactionDB::open_default(path).unwrap();
         Ok(DatabaseEnv { inner, metrics: None })
@@ -299,9 +250,7 @@ mod tests {
     };
     use reth_interfaces::db::{DatabaseWriteError, DatabaseWriteOperation};
     use reth_primitives::{Account, Address, Header, IntegerList, StorageEntry, B256, U256};
-    use rocksdb::Error;
     use std::str::FromStr;
-    use tempfile::TempDir;
 
     /// Create database for testing
     fn create_test_db(kind: DatabaseEnvKind) -> Arc<DatabaseEnv> {
@@ -360,7 +309,6 @@ mod tests {
 
         let address0 = Address::ZERO;
         let address1 = Address::with_last_byte(1);
-        let address2 = Address::with_last_byte(2);
 
         let tx = env.tx_mut().expect(ERROR_INIT_TX);
         tx.put::<AccountChangeSets>(1, AccountBeforeTx { address: address0, info: None })
@@ -377,9 +325,7 @@ mod tests {
 
         let tx = env.tx().expect(ERROR_INIT_TX);
         let mut cursor = tx.cursor_read::<AccountChangeSets>().unwrap();
-        let mut walker: RangeWalker<'_, AccountChangeSets, _> = cursor.walk_range(..).unwrap();
-
-        let mut walker: RangeWalker<'_, AccountChangeSets, _> = cursor.walk_range(0..=2).unwrap();
+        let mut walker = cursor.walk_range(0..=2).unwrap();
         assert_eq!(walker.next(), Some(Ok((1, AccountBeforeTx { address: address0, info: None }))));
         assert_eq!(walker.next(), Some(Ok((1, AccountBeforeTx { address: address1, info: None }))));
         assert_eq!(walker.next(), None,);
@@ -401,7 +347,7 @@ mod tests {
         let tx = env.tx().expect(ERROR_INIT_TX);
         let mut cursor = tx.cursor_read::<Headers>().unwrap();
 
-        let first: PairResult<Headers> = cursor.first();
+        let first = cursor.first();
         assert!(first.unwrap().is_some(), "First should be our put");
 
         // Walk
@@ -426,7 +372,7 @@ mod tests {
         let mut cursor = tx.cursor_read::<CanonicalHeaders>().unwrap();
 
         // [1, 3)
-        let mut walker: RangeWalker<'_, CanonicalHeaders, _> = cursor.walk_range(1..3).unwrap();
+        let mut walker = cursor.walk_range(1..3).unwrap();
         assert_eq!(walker.next(), Some(Ok((1, B256::ZERO))));
         assert_eq!(walker.next(), Some(Ok((2, B256::ZERO))));
         assert_eq!(walker.next(), None);
@@ -434,7 +380,7 @@ mod tests {
         assert_eq!(walker.next(), None);
 
         // [1, 2]
-        let mut walker: RangeWalker<'_, CanonicalHeaders, _> = cursor.walk_range(1..=2).unwrap();
+        let mut walker = cursor.walk_range(1..=2).unwrap();
         assert_eq!(walker.next(), Some(Ok((1, B256::ZERO))));
         assert_eq!(walker.next(), Some(Ok((2, B256::ZERO))));
         // next() returns None after walker is done
@@ -502,7 +448,7 @@ mod tests {
         let tx = db.tx().expect(ERROR_INIT_TX);
         let mut cursor = tx.cursor_read::<AccountChangeSets>().unwrap();
 
-        let mut walker = cursor.walk_range(..).unwrap();
+        let walker = cursor.walk_range(..).unwrap();
 
         let entries = walker.collect::<Result<Vec<_>, _>>().unwrap();
         assert_eq!(entries.len(), 7);
@@ -1142,7 +1088,6 @@ mod tests {
             // It will seek the MAX value of transition index and try to use prev to get first
             // biggers.
             let _unknown = cursor.seek_exact(ShardedKey::new(real_key, u64::MAX)).unwrap();
-            println!("_unknown {:?} {:?}", ShardedKey::new(real_key, u64::MAX), &_unknown);
             let (key, list) = cursor
                 .prev()
                 .expect("element should exist.")

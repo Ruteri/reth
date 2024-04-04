@@ -25,7 +25,7 @@ pub(crate) mod utils;
 
 use crate::{
     abstraction::table::Table,
-    table::{self, Decode, DupSort, Encode},
+    table::{Decode, DupSort, Encode},
     tables::{
         codecs::CompactU256,
         models::{

@@ -1,17 +1,11 @@
 use crate::{
-    common::{IterPairResult, PairResult, ValueOnlyResult},
-    cursor::{
-        DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, DupWalker, RangeWalker,
-        ReverseWalker, Walker,
-    },
-    database::Database,
     table::{Compress, DupSort, Encode, KeyFormat, Table, TableImporter},
-    tables::{utils::decode_one, Tables},
+    tables::utils::decode_one,
     transaction::{DbTx, DbTxMut},
     DatabaseError,
 };
-use core::ops::Bound;
-use std::{collections::BTreeMap, ops::RangeBounds, sync::Mutex};
+
+use std::sync::Mutex;
 
 use crate::reth_rocksdb;
 use crate::reth_rocksdb::cursor::Cursor;

@@ -7,7 +7,7 @@ use rustc_hash::{FxHashMap, FxHasher};
 use std::{
     collections::HashMap,
     hash::BuildHasherDefault,
-    time::{Duration, Instant},
+    time::{Instant},
 };
 use strum::{EnumCount, EnumIter, IntoEnumIterator};
 
@@ -19,7 +19,7 @@ const LARGE_VALUE_THRESHOLD_BYTES: usize = 4096;
 /// Requires a metric recorder to be registered before creating an instance of this struct.
 /// Otherwise, metric recording will no-op.
 #[derive(Debug)]
-pub struct DatabaseEnvMetrics {
+pub(crate) struct DatabaseEnvMetrics {
     /// Caches OperationMetrics handles for each table and operation tuple.
     operations: FxHashMap<(Tables, Operation), OperationMetrics>,
     /// Caches TransactionMetrics handles for counters grouped by only transaction mode.

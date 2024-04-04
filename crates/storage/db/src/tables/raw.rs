@@ -17,7 +17,7 @@ pub struct RawTable<T: Table> {
 impl<T: Table> KeyFormat<<RawTable<T> as Table>::Key, <RawTable<T> as Table>::Value>
     for RawTable<T>
 {
-    fn format_key(k: <RawTable<T> as Table>::Key, v: &<RawTable<T> as Table>::Value) -> Vec<u8> {
+    fn format_key(k: <RawTable<T> as Table>::Key, _v: &<RawTable<T> as Table>::Value) -> Vec<u8> {
         k.encode().into()
     }
     fn unformat_key(raw_key: Vec<u8>) -> <RawTable<T> as Table>::Key {

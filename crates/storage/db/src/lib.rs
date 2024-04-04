@@ -106,10 +106,7 @@ use std::path::Path;
 
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
-pub fn init_db<'db, P: AsRef<Path>>(
-    path: P,
-    args: DatabaseArguments,
-) -> eyre::Result<DatabaseEnv<'db>> {
+pub fn init_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
     use crate::version::{check_db_version_file, create_db_version_file, DatabaseVersionError};
 
     let rpath = path.as_ref();
@@ -133,7 +130,7 @@ pub fn init_db<'db, P: AsRef<Path>>(
     }
     #[cfg(feature = "rocksdb")]
     {
-        let db = DatabaseEnv::open(rpath, DatabaseEnvKind::RW, args.clone())?;
+        let mut db = DatabaseEnv::open(rpath, DatabaseEnvKind::RW, args.clone())?;
         db.create_tables()?;
         db.record_client_version(args.client_version().clone())?;
         return Ok(db);
@@ -145,7 +142,7 @@ pub fn init_db<'db, P: AsRef<Path>>(
 }
 
 /// Opens up an existing database. Read only mode. It doesn't create it or create tables if missing.
-pub fn open_db_read_only(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv<'_>> {
+pub fn open_db_read_only(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
     #[cfg(feature = "mdbx")]
     {
         DatabaseEnv::open(path, DatabaseEnvKind::RO, args)
@@ -164,7 +161,7 @@ pub fn open_db_read_only(path: &Path, args: DatabaseArguments) -> eyre::Result<D
 
 /// Opens up an existing database. Read/Write mode with WriteMap enabled. It doesn't create it or
 /// create tables if missing.
-pub fn open_db(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv<'_>> {
+pub fn open_db(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
     #[cfg(feature = "mdbx")]
     {
         let db = DatabaseEnv::open(path, DatabaseEnvKind::RW, args.clone())
@@ -285,7 +282,7 @@ pub mod test_utils {
     }
 
     /// Create read/write database for testing
-    pub fn create_test_rw_db() -> Arc<TempDatabase<DatabaseEnv<'static>>> {
+    pub fn create_test_rw_db() -> Arc<TempDatabase<DatabaseEnv>> {
         let path = tempdir_path();
         let emsg = format!("{}: {:?}", ERROR_DB_CREATION, path);
 

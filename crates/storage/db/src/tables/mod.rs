@@ -25,7 +25,7 @@ pub(crate) mod utils;
 
 use crate::{
     abstraction::table::Table,
-    table::DupSort,
+    table::{self, Decode, DupSort, Encode},
     tables::{
         codecs::CompactU256,
         models::{
@@ -101,6 +101,24 @@ pub trait TableViewer<R> {
     }
 }
 
+macro_rules! dedup_table {
+    ($name:ident<Key = $key:ty, Value = $value:ty, SubKey = >) => {
+        impl $crate::table::KeyFormat<$key, $value> for $name {
+            fn format_key(k: $key, _v: &$value) -> Vec<u8> {
+                Encode::encode(k).into()
+            }
+            fn unformat_key(raw_key: Vec<u8>) -> $key {
+                <$key>::decode(raw_key).unwrap()
+            }
+        }
+    };
+    ($name:ident<Key = $key:ty, Value = $value:ty, SubKey = $subkey:ty>) => {
+        impl DupSort for $name {
+            type SubKey = $subkey;
+        }
+    };
+}
+
 /// Defines all the tables in the database.
 macro_rules! tables {
     (@bool) => { false };
@@ -108,6 +126,10 @@ macro_rules! tables {
 
     (@view $name:ident $v:ident) => { $v.view::<$name>() };
     (@view $name:ident $v:ident $_subkey:ty) => { $v.view_dupsort::<$name>() };
+
+    /*
+     *
+    */
 
     ($( $(#[$attr:meta])* table $name:ident<Key = $key:ty, Value = $value:ty $(, SubKey = $subkey:ty)? $(,)?>; )*) => {
         // Table marker types.
@@ -137,11 +159,7 @@ macro_rules! tables {
                 type Value = $value;
             }
 
-            $(
-                impl DupSort for $name {
-                    type SubKey = $subkey;
-                }
-            )?
+            dedup_table!($name<Key = $key, Value = $value, SubKey = $($subkey)?>);
         )*
 
         // Tables enum.

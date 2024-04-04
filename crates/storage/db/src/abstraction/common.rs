@@ -28,7 +28,7 @@ mod sealed {
 
     impl<DB: Database> Sealed for &DB {}
     impl<DB: Database> Sealed for Arc<DB> {}
-    impl Sealed for DatabaseEnv<'_> {}
+    impl Sealed for DatabaseEnv {}
     impl Sealed for DatabaseMock {}
 
     #[cfg(any(test, feature = "test-utils"))]

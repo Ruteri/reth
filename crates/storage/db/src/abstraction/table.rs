@@ -70,6 +70,11 @@ pub trait Value: Compress + Decompress + Serialize {}
 
 impl<T> Value for T where T: Compress + Decompress + Serialize {}
 
+pub trait KeyFormat<K: Key, V: Value> {
+    fn format_key(k: K, v: &V) -> Vec<u8>;
+    fn unformat_key(raw_key: Vec<u8>) -> K;
+}
+
 /// Generic trait that a database table should follow.
 ///
 /// The [`Table::Key`] and [`Table::Value`] types should implement [`Encode`] and
@@ -78,7 +83,7 @@ impl<T> Value for T where T: Compress + Decompress + Serialize {}
 ///
 /// It allows for the use of codecs. See [`crate::models::ShardedKey`] for a custom
 /// implementation.
-pub trait Table: Send + Sync + Debug + 'static {
+pub trait Table: Send + Sync + Debug + 'static + KeyFormat<Self::Key, Self::Value> {
     /// The dynamic type of the table.
     const TABLE: crate::Tables;
 

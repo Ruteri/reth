@@ -179,8 +179,33 @@ impl DatabaseEnv {
         let mut opts = rocksdb::Options::default();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
+
         let tx_opts = rocksdb::TransactionDBOptions::default();
-        let inner = rocksdb::TransactionDB::open(&opts, &tx_opts, path).unwrap();
+
+        if let Ok(mut inner) =
+            rocksdb::TransactionDB::<rocksdb::SingleThreaded>::open(&opts, &tx_opts, path)
+        {
+            for table in Tables::ALL {
+                inner.create_cf(table.name(), &rocksdb::Options::default()).map_err(|e| {
+                    DatabaseError::CreateTable(DatabaseErrorInfo {
+                        message: e.to_string(),
+                        code: 1,
+                    })
+                })?;
+            }
+            return Ok(DatabaseEnv { inner, metrics: None });
+        }
+
+        let mut cfs: Vec<rocksdb::ColumnFamilyDescriptor> = Vec::new();
+        for table in Tables::ALL {
+            cfs.push(rocksdb::ColumnFamilyDescriptor::new(
+                table.name(),
+                rocksdb::Options::default(),
+            ))
+        }
+
+        let inner =
+            rocksdb::TransactionDB::open_cf_descriptors(&opts, &tx_opts, path, cfs).unwrap();
         Ok(DatabaseEnv { inner, metrics: None })
     }
 
@@ -192,16 +217,6 @@ impl DatabaseEnv {
 
     /// Creates all the defined tables, if necessary.
     pub fn create_tables(&mut self) -> Result<(), DatabaseError> {
-        // TODO: create and cache all column families
-        for table in Tables::ALL {
-            // TODO: make sure duplicate values behave as expected
-            //t
-
-            let opts = rocksdb::Options::default();
-            self.inner.create_cf(table.name(), &opts).map_err(|e| {
-                DatabaseError::CreateTable(DatabaseErrorInfo { message: e.to_string(), code: 1 })
-            })?;
-        }
         Ok(())
     }
 

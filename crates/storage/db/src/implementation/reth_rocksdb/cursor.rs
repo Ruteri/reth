@@ -461,24 +461,19 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
         _key: <T as Table>::Key,
         _value: <T as Table>::Value,
     ) -> Result<(), DatabaseError> {
-        match self.current.clone() {
-            None => {
-                let last_el = self.last();
-                match last_el {
-                    Err(e) => Err(DatabaseWriteError {
-                        info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
-                        operation: DatabaseWriteOperation::CursorAppend,
-                        table_name: T::NAME,
-                        key: _key.encode().into(),
-                    }
-                    .into()),
-                    Ok(None) => self.upsert(_key, _value),
-                    Ok(Some(_item)) => self.append(_key, _value),
-                }
+        let last_el = self.last();
+        match last_el {
+            Err(e) => Err(DatabaseWriteError {
+                info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
+                operation: DatabaseWriteOperation::CursorAppend,
+                table_name: T::NAME,
+                key: _key.encode().into(),
             }
-            Some(ck) => {
+            .into()),
+            Ok(None) => self.upsert(_key, _value),
+            Ok(Some(_item)) => {
                 let ext_key = _key.clone().encode();
-                if ck.split_at(ext_key.as_ref().len()).0 > ext_key.as_ref() {
+                if _item.0.encode().as_ref() > ext_key.as_ref() {
                     return Err(DatabaseWriteError {
                         info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
                         operation: DatabaseWriteOperation::CursorAppend,

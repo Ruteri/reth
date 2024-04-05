@@ -21,7 +21,6 @@ impl
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::PlainStorageState as Table>::Key {
-        println!("unformat raw key {:?}", raw_key);
         <tables::PlainStorageState as Table>::Key::decode(raw_key.as_slice().split_at(20).0)
             .unwrap()
     }
@@ -43,7 +42,6 @@ impl
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::AccountChangeSets as Table>::Key {
-        println!("unformat raw key {:?}", raw_key);
         BlockNumber::decode(raw_key.as_slice().split_at(8).0).unwrap()
     }
 }
@@ -56,14 +54,18 @@ impl
 {
     fn format_key(
         k: <tables::StorageChangeSets as Table>::Key,
-        _v: &<tables::StorageChangeSets as Table>::Value,
+        v: &<tables::StorageChangeSets as Table>::Value,
     ) -> Vec<u8> {
-        let primary_key: Vec<u8> = k.encode().as_ref().into();
+        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
+        primary_key.extend_from_slice(&v.key.0);
         primary_key
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::StorageChangeSets as Table>::Key {
-        <tables::StorageChangeSets as Table>::Key::decode(raw_key).unwrap()
+        crate::tables::models::accounts::BlockNumberAddress::decode(
+            raw_key.as_slice().split_at(28).0,
+        )
+        .unwrap()
     }
 }
 
@@ -72,14 +74,15 @@ impl KeyFormat<<tables::HashedStorages as Table>::Key, <tables::HashedStorages a
 {
     fn format_key(
         k: <tables::HashedStorages as Table>::Key,
-        _v: &<tables::HashedStorages as Table>::Value,
+        v: &<tables::HashedStorages as Table>::Value,
     ) -> Vec<u8> {
-        let primary_key: Vec<u8> = k.encode().as_ref().into();
+        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
+        primary_key.extend_from_slice(&v.key.0);
         primary_key
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::HashedStorages as Table>::Key {
-        <tables::HashedStorages as Table>::Key::decode(raw_key).unwrap()
+        <tables::HashedStorages as Table>::Key::decode(raw_key.as_slice().split_at(32).0).unwrap()
     }
 }
 
@@ -88,14 +91,15 @@ impl KeyFormat<<tables::StoragesTrie as Table>::Key, <tables::StoragesTrie as Ta
 {
     fn format_key(
         k: <tables::HashedStorages as Table>::Key,
-        _v: &<tables::StoragesTrie as Table>::Value,
+        v: &<tables::StoragesTrie as Table>::Value,
     ) -> Vec<u8> {
-        let primary_key: Vec<u8> = k.encode().as_ref().into();
+        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
+        primary_key.extend_from_slice(&v.nibbles.0);
         primary_key
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::StoragesTrie as Table>::Key {
-        <tables::StoragesTrie as Table>::Key::decode(raw_key).unwrap()
+        <tables::StoragesTrie as Table>::Key::decode(raw_key.as_slice().split_at(32).0).unwrap()
     }
 }
 

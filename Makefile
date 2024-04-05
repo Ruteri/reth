@@ -314,7 +314,7 @@ rustdocs: ## Runs `cargo docs` to generate the Rust documents in the `target/doc
 	--document-private-items
 
 test-reth:
-	cargo test \
+	cargo test -j3 \
 	--workspace \
 	--bin "reth" \
 	--lib \
@@ -324,7 +324,7 @@ test-reth:
 	--features "ethereum $(BIN_OTHER_FEATURES)"
 
 test-op-reth:
-	cargo test \
+	cargo test -j3 \
 	--workspace \
 	--bin "op-reth" \
 	--lib --examples \
@@ -333,7 +333,7 @@ test-op-reth:
 	--features "optimism $(BIN_OTHER_FEATURES)"
 
 test-other-targets:
-	cargo test \
+	cargo test -j3 \
 	--workspace \
 	--lib \
 	--examples \
@@ -342,8 +342,8 @@ test-other-targets:
 	--all-features
 
 test-doc:
-	cargo test --doc --workspace --features "ethereum"
-	cargo test --doc --workspace --features "optimism"
+	cargo test -j3 --doc --workspace --features "ethereum"
+	cargo test -j3 --doc --workspace --features "optimism"
 
 test:
 	make test-reth && \

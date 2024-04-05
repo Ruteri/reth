@@ -16,7 +16,7 @@ workspace = true
 # reth
 reth-config.workspace = true
 reth-primitives = { workspace = true, features = ["arbitrary", "clap"] }
-reth-db = { workspace = true, features = ["mdbx"] }
+reth-db = { workspace = true, features = ["rocksdb"] }
 reth-provider = { workspace = true }
 reth-revm.workspace = true
 reth-stages.workspace = true
@@ -107,6 +107,7 @@ assert_matches = "1.5.0"
 
 [features]
 default = ["jemalloc"]
+mdbx = []
 
 asm-keccak = ["reth-primitives/asm-keccak"]
 

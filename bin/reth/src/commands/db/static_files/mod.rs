@@ -3,9 +3,8 @@ use human_bytes::human_bytes;
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reth_db::{
-    database::Database,
-    mdbx::{DatabaseArguments, MaxReadTransactionDuration},
-    open_db_read_only, DatabaseEnv,
+    database::Database, open_db_read_only, DatabaseArguments, DatabaseEnv,
+    MaxReadTransactionDuration,
 };
 use reth_nippy_jar::{NippyJar, NippyJarCursor};
 use reth_node_core::dirs::{ChainPath, DataDirPath};

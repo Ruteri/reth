@@ -2,7 +2,7 @@ use reth_db::{
     database::Database,
     table::{Compress, Encode, Table, TableRow},
     test_utils::create_test_rw_db_with_path,
-    transaction::DbTxMut,
+    transaction::{DbTx, DbTxMut},
     DatabaseEnv,
 };
 use reth_primitives::{fs, Bytes};
@@ -67,7 +67,7 @@ where
         for (k, _, v, _) in pair.clone() {
             tx.put::<T>(k, v).expect("submit");
         }
-        tx.inner.commit().unwrap();
+        tx.commit().unwrap();
     }
 
     db.into_inner_db()

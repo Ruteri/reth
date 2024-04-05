@@ -40,7 +40,6 @@ mod tests {
     use alloy_rlp::Decodable;
     use reth_db::{
         cursor::DbCursorRO,
-        mdbx::{cursor::Cursor, RW},
         tables,
         test_utils::TempDatabase,
         transaction::{DbTx, DbTxMut},
@@ -175,8 +174,8 @@ mod tests {
                 assert!(acc_indexing_stage.execute(&provider, input).is_err());
             } else {
                 acc_indexing_stage.execute(&provider, input).unwrap();
-                let mut account_history: Cursor<RW, AccountsHistory> =
-                    provider.tx_ref().cursor_read::<tables::AccountsHistory>().unwrap();
+                let mut account_history =
+                   provider.tx_ref().cursor_read::<tables::AccountsHistory>().unwrap();
                 assert_eq!(account_history.walk(None).unwrap().count(), expect_num_acc_changesets);
             }
 

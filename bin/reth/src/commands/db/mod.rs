@@ -20,13 +20,19 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(feature = "mdbx")]
 mod clear;
+#[cfg(feature = "mdbx")]
 mod diff;
 mod get;
+#[cfg(feature = "mdbx")]
 mod list;
+#[cfg(feature = "mdbx")]
 mod static_files;
+#[cfg(feature = "mdbx")]
 mod stats;
 /// DB List TUI
+#[cfg(feature = "mdbx")]
 mod tui;
 
 /// `reth db` command
@@ -66,22 +72,29 @@ pub struct Command {
 /// `reth db` subcommands
 pub enum Subcommands {
     /// Lists all the tables, their entry count and their size
+#[cfg(feature = "mdbx")]
     Stats(stats::Command),
     /// Lists the contents of a table
+#[cfg(feature = "mdbx")]
     List(list::Command),
     /// Create a diff between two database tables or two entire databases.
+#[cfg(feature = "mdbx")]
     Diff(diff::Command),
     /// Gets the content of a table for the given key
+#[cfg(feature = "mdbx")]
     Get(get::Command),
     /// Deletes all database entries
+#[cfg(feature = "mdbx")]
     Drop {
         /// Bypasses the interactive confirmation and drops the database directly
         #[arg(short, long)]
         force: bool,
     },
     /// Deletes all table entries
+#[cfg(feature = "mdbx")]
     Clear(clear::Command),
     /// Creates static files from database tables
+#[cfg(feature = "mdbx")]
     CreateStaticFiles(static_files::Command),
     /// Lists current and local database versions
     Version,
@@ -100,6 +113,7 @@ impl Command {
 
         match self.command {
             // TODO: We'll need to add this on the DB trait.
+#[cfg(feature = "mdbx")]
             Subcommands::Stats(command) => {
                 let db = open_db_read_only(&db_path, db_args)?;
                 let provider_factory =
@@ -108,6 +122,7 @@ impl Command {
                 let tool = DbTool::new(provider_factory, self.chain.clone())?;
                 command.execute(data_dir, &tool)?;
             }
+#[cfg(feature = "mdbx")]
             Subcommands::List(command) => {
                 let db = open_db_read_only(&db_path, db_args)?;
                 let provider_factory =
@@ -116,6 +131,7 @@ impl Command {
                 let tool = DbTool::new(provider_factory, self.chain.clone())?;
                 command.execute(&tool)?;
             }
+#[cfg(feature = "mdbx")]
             Subcommands::Diff(command) => {
                 let db = open_db_read_only(&db_path, db_args)?;
                 let provider_factory =
@@ -124,6 +140,7 @@ impl Command {
                 let tool = DbTool::new(provider_factory, self.chain.clone())?;
                 command.execute(&tool)?;
             }
+#[cfg(feature = "mdbx")]
             Subcommands::Get(command) => {
                 let db = open_db_read_only(&db_path, db_args)?;
                 let provider_factory =
@@ -132,6 +149,7 @@ impl Command {
                 let tool = DbTool::new(provider_factory, self.chain.clone())?;
                 command.execute(&tool)?;
             }
+#[cfg(feature = "mdbx")]
             Subcommands::Drop { force } => {
                 if !force {
                     // Ask for confirmation
@@ -155,6 +173,7 @@ impl Command {
                 let mut tool = DbTool::new(provider_factory, self.chain.clone())?;
                 tool.drop(db_path, static_files_path)?;
             }
+#[cfg(feature = "mdbx")]
             Subcommands::Clear(command) => {
                 let db = open_db(&db_path, db_args)?;
                 let provider_factory =
@@ -162,6 +181,7 @@ impl Command {
 
                 command.execute(provider_factory)?;
             }
+#[cfg(feature = "mdbx")]
             Subcommands::CreateStaticFiles(command) => {
                 command.execute(data_dir, self.db.database_args(), self.chain.clone())?;
             }

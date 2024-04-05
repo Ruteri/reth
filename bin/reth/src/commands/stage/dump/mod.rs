@@ -11,7 +11,7 @@ use crate::args::{
 };
 use clap::Parser;
 use reth_db::{
-    cursor::DbCursorRO, database::Database, init_db, mdbx::DatabaseArguments,
+    cursor::DbCursorRO, database::Database, init_db, DatabaseArguments,
     models::client_version::ClientVersion, table::TableImporter, tables, transaction::DbTx,
     DatabaseEnv,
 };

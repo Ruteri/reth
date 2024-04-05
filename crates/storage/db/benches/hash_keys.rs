@@ -169,7 +169,7 @@ where
                 crsr.append(k, v).expect("submit");
             }
 
-            tx.inner.commit().unwrap()
+            tx.commit().unwrap()
         });
     }
     db
@@ -187,7 +187,7 @@ where
                 crsr.insert(k, v).expect("submit");
             }
 
-            tx.inner.commit().unwrap()
+            tx.commit().unwrap()
         });
     }
     db
@@ -204,7 +204,7 @@ where
                 tx.put::<T>(k, v).expect("submit");
             }
 
-            tx.inner.commit().unwrap()
+            tx.commit().unwrap()
         });
     }
     db
@@ -225,6 +225,7 @@ fn get_table_stats<T>(db: DatabaseEnv)
 where
     T: Table,
 {
+    #[cfg(features = "mdbx")]
     db.view(|tx| {
         let table_db = tx.inner.open_db(Some(T::NAME)).map_err(|_| "Could not open db.").unwrap();
 

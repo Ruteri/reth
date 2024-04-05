@@ -63,6 +63,9 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg, doc_auto_cfg))]
 
+#[cfg(all(feature = "mdbx", feature = "rocksdb"))]
+compile_error!("feature \"mdbx\" and feature \"rocksdb\" cannot be enabled at the same time");
+
 /// Traits defining the database abstractions, such as cursors and transactions.
 pub mod abstraction;
 
@@ -89,7 +92,10 @@ pub use utils::is_database_empty;
 pub use mdbx::{DatabaseEnv, DatabaseEnvKind};
 
 #[cfg(feature = "mdbx")]
-use crate::mdbx::DatabaseArguments;
+pub use crate::mdbx::DatabaseArguments;
+
+#[cfg(feature = "mdbx")]
+pub use reth_libmdbx::MaxReadTransactionDuration;
 
 #[cfg(feature = "rocksdb")]
 pub mod reth_rocksdb {
@@ -99,7 +105,10 @@ pub mod reth_rocksdb {
 pub use reth_rocksdb::{DatabaseEnv, DatabaseEnvKind};
 
 #[cfg(feature = "rocksdb")]
-use crate::reth_rocksdb::DatabaseArguments;
+pub use crate::reth_rocksdb::DatabaseArguments;
+
+#[cfg(feature = "rocksdb")]
+pub use reth_rocksdb::MaxReadTransactionDuration;
 
 use eyre::WrapErr;
 use std::path::Path;

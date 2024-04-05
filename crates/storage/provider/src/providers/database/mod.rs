@@ -32,7 +32,8 @@ mod metrics;
 mod provider;
 
 pub use provider::{DatabaseProvider, DatabaseProviderRO, DatabaseProviderRW};
-use reth_db::mdbx::DatabaseArguments;
+
+use reth_db::DatabaseArguments;
 
 /// A common provider that fetches data from a database or static file.
 ///
@@ -140,13 +141,13 @@ impl<DB: Database> ProviderFactory<DB> {
         provider: DatabaseProviderRO<DB>,
         mut block_number: BlockNumber,
     ) -> ProviderResult<StateProviderBox> {
-        if block_number == provider.best_block_number().unwrap_or_default() &&
-            block_number == provider.last_block_number().unwrap_or_default()
+        if block_number == provider.best_block_number().unwrap_or_default()
+            && block_number == provider.last_block_number().unwrap_or_default()
         {
             return Ok(Box::new(LatestStateProvider::new(
                 provider.into_tx(),
                 self.static_file_provider(),
-            )))
+            )));
         }
 
         // +1 as the changeset that we want is the one that was applied after this block.
@@ -246,7 +247,7 @@ impl<DB: Database> HeaderProvider for ProviderFactory<DB> {
         if let Some(td) = self.chain_spec.final_paris_total_difficulty(number) {
             // if this block is higher than the final paris(merge) block, return the final paris
             // difficulty
-            return Ok(Some(td))
+            return Ok(Some(td));
         }
 
         self.static_file_provider.get_with_static_file_or_database(
@@ -613,9 +614,9 @@ mod tests {
     use assert_matches::assert_matches;
     use rand::Rng;
     use reth_db::{
-        mdbx::DatabaseArguments,
         tables,
         test_utils::{create_test_static_files_dir, ERROR_TEMPDIR},
+        DatabaseArguments,
     };
     use reth_interfaces::{
         provider::ProviderError,

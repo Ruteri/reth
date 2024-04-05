@@ -176,7 +176,11 @@ impl DatabaseEnv {
         _kind: DatabaseEnvKind,
         _args: DatabaseArguments,
     ) -> Result<DatabaseEnv, DatabaseError> {
-        let inner = rocksdb::TransactionDB::open_default(path).unwrap();
+        let mut opts = rocksdb::Options::default();
+        opts.create_if_missing(true);
+        opts.create_missing_column_families(true);
+        let tx_opts = rocksdb::TransactionDBOptions::default();
+        let inner = rocksdb::TransactionDB::open(&opts, &tx_opts, path).unwrap();
         Ok(DatabaseEnv { inner, metrics: None })
     }
 

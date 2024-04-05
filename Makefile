@@ -59,7 +59,7 @@ install-op: ## Build and install the op-reth binary under `~/.cargo/bin`.
 
 .PHONY: build
 build: ## Build the reth binary into `target` directory.
-	$(MAKE) build-native-$(shell rustc -Vv | grep host | cut -d ' ' -f2)
+	$(MAKE) -j3 build-native-$(shell rustc -Vv | grep host | cut -d ' ' -f2)
 
 .PHONY: build-op
 build-op: ## Build the op-reth binary into `target` directory.
@@ -175,7 +175,7 @@ $(EF_TESTS_DIR):
 
 .PHONY: ef-tests
 ef-tests: $(EF_TESTS_DIR) ## Runs Ethereum Foundation tests.
-	cargo nextest run -p ef-tests --features ef-tests
+	cargo nextest run -j 3 -p ef-tests --features ef-tests
 
 ##@ Docker
 

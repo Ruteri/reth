@@ -1,7 +1,7 @@
 use crate::{
     common::{IterPairResult, PairResult, ValueOnlyResult},
     cursor::{
-        DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, DupWalker, RangeWalker,
+        self, DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, DupWalker, RangeWalker,
         ReverseWalker, Walker,
     },
     reth_rocksdb,
@@ -15,12 +15,47 @@ use core::ops::Bound;
 use core::ops::Deref;
 use reth_interfaces::db::DatabaseErrorInfo;
 use reth_interfaces::db::{DatabaseWriteError, DatabaseWriteOperation};
+use reth_primitives::ForkId;
 
-use std::borrow::Cow;
 use std::fmt;
 use std::ops::RangeBounds;
+use std::{borrow::Cow, iter::Rev};
 
 use rocksdb;
+
+use rocksdb::Direction::{self, Forward, Reverse};
+
+#[derive(Clone)]
+enum CursorIt {
+    Start(Direction),
+    End(Direction),
+    Key(Box<[u8]>, Direction),
+}
+
+fn cursor_direction(c: &CursorIt) -> Direction {
+    match c {
+        CursorIt::Start(d) => *d,
+        CursorIt::End(d) => *d,
+        CursorIt::Key(_, d) => *d,
+    }
+}
+
+fn change_direction_if_needed(c: CursorIt, nd: Direction) -> CursorIt {
+    match nd {
+        Forward => match c {
+            CursorIt::Start(Reverse) => CursorIt::Start(nd),
+            CursorIt::End(Reverse) => CursorIt::End(nd),
+            CursorIt::Key(k, Reverse) => CursorIt::Key(k, nd),
+            _ => c,
+        },
+        Reverse => match c {
+            CursorIt::Start(Forward) => CursorIt::Start(nd),
+            CursorIt::End(Forward) => CursorIt::End(nd),
+            CursorIt::Key(k, Forward) => CursorIt::Key(k, nd),
+            _ => c,
+        },
+    }
+}
 
 /// Cursor that iterates over table
 pub struct Cursor<'itx, 'it, T: Table> {
@@ -28,7 +63,7 @@ pub struct Cursor<'itx, 'it, T: Table> {
         rocksdb::DBIteratorWithThreadMode<'it, rocksdb::Transaction<'it, rocksdb::TransactionDB>>,
     pub tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
     // TODO: use peekable once it's not unstable
-    pub current: Option<Box<[u8]>>,
+    pub current: CursorIt,
     table_type: std::marker::PhantomData<T>,
 }
 
@@ -40,44 +75,7 @@ impl<'itx, 'it: 'itx, T: Table> Cursor<'itx, 'it, T> {
         >,
         tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
     ) -> Cursor<'itx, 'it, T> {
-        Self { iter, tx, current: None, table_type: std::marker::PhantomData }
-    }
-
-    // Note: self.current should hold the extended dup key!
-    fn update_current_and_decode(
-        &mut self,
-        res: Option<Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>,
-    ) -> PairResult<T> {
-        match res {
-            None => Ok(None),
-            Some(r) => match r {
-                Err(e) => {
-                    Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
-                }
-                Ok(item) => {
-                    self.current = Some(item.0.clone());
-                    match T::TABLE.is_dupsort() {
-                        true => {
-                            let key =
-                                <T as KeyFormat<T::Key, T::Value>>::unformat_key(item.0.into_vec());
-                            let value =
-                                decode_one::<T>(Cow::Owned(item.1.into_vec())).map_err(|e| {
-                                    DatabaseError::Read(DatabaseErrorInfo {
-                                        message: e.to_string(),
-                                        code: 1,
-                                    })
-                                })?;
-                            Ok(Some((key, value)))
-                        }
-                        false => Some(decoder::<T>((
-                            Cow::Owned(item.0.into_vec()),
-                            Cow::Owned(item.1.into_vec()),
-                        )))
-                        .transpose(),
-                    }
-                }
-            },
-        }
+        Self { iter, tx, current: CursorIt::Start(Forward), table_type: std::marker::PhantomData }
     }
 }
 
@@ -90,9 +88,18 @@ impl<T: Table> fmt::Debug for Cursor<'_, '_, T> {
 impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
     fn first(&mut self) -> PairResult<T> {
         self.iter.set_mode(rocksdb::IteratorMode::Start);
+        self.current = CursorIt::Start(Forward);
 
-        let it_el = self.iter.next();
-        self.update_current_and_decode(it_el)
+        match self.iter.next() {
+            None => Ok(None),
+            Some(Err(e)) => {
+                Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
+            }
+            Some(Ok(el)) => {
+                self.current = CursorIt::Key(el.0.clone(), Forward);
+                decode::<T>(Some(Ok(el)))
+            }
+        }
     }
 
     fn seek_exact(&mut self, _key: T::Key) -> PairResult<T> {
@@ -102,146 +109,172 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
             rocksdb::Direction::Forward,
         ));
 
-        let it_el = self.iter.find(|res| match res {
-            Err(_e) => false,
-            Ok((k, _v)) => {
-                if T::TABLE.is_dupsort() {
-                    return encoded_key.as_ref()
-                        <= k.as_ref().split_at(encoded_key.as_ref().len()).0;
-                } else {
-                    return encoded_key.as_ref() <= k.deref();
-                }
-            }
-        });
-        match it_el {
+        match self.iter.next() {
             None => {
-                // TODO: should be the extended key
-                self.current = Some(encoded_key.as_ref().into());
+                self.current = CursorIt::End(Forward);
                 Ok(None)
             }
             Some(Err(e)) => {
                 Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
             }
-            Some(Ok((k, v))) => {
-                self.current = Some(k.clone());
-                if T::TABLE.is_dupsort() {
-                    if encoded_key.as_ref() == k.as_ref().split_at(encoded_key.as_ref().len()).0 {
-                        return Ok(Some((_key, decode_one::<T>(Cow::Owned(v.into_vec()))?)));
-                    }
-                } else {
-                    if encoded_key.as_ref() == k.deref() {
-                        return Ok(Some((_key, decode_one::<T>(Cow::Owned(v.into_vec()))?)));
-                    }
+            Some(Ok(n_el)) => {
+                self.current = CursorIt::Key(n_el.0.clone(), Forward);
+                match encoded_key.as_ref() == n_el.0.as_ref().split_at(encoded_key.as_ref().len()).0
+                {
+                    true => decode::<T>(Some(Ok(n_el))),
+                    false => Ok(None),
                 }
-                Ok(None)
             }
         }
     }
 
     fn seek(&mut self, _key: T::Key) -> PairResult<T> {
         let encoded_key = _key.clone().encode();
-        self.iter.set_mode(rocksdb::IteratorMode::From(
-            encoded_key.as_ref(),
-            rocksdb::Direction::Forward,
-        ));
-        let it_el = self.iter.find(|res| match res {
-            Err(_e) => false,
-            Ok((k, _v)) => {
-                if T::TABLE.is_dupsort() {
-                    return encoded_key.as_ref()
-                        <= k.as_ref().split_at(encoded_key.as_ref().len()).0;
-                } else {
-                    return encoded_key.as_ref() <= k.deref();
-                }
-            }
-        });
-        match it_el {
+        self.iter.set_mode(rocksdb::IteratorMode::From(encoded_key.as_ref(), Forward));
+        match self.iter.next() {
             None => {
-                // TODO: should be extended (mark after the highest key-subkey)
-                // Either needs to be an enum or we can do encoded_key+subkey of last
-                self.current = Some(encoded_key.as_ref().into());
+                self.current = CursorIt::End(Forward);
                 Ok(None)
             }
             Some(Err(e)) => {
                 Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
             }
             Some(Ok(it_r)) => {
-                self.current = Some(it_r.0.clone());
+                self.current = CursorIt::Key(it_r.0.clone(), Forward);
                 decode::<T>(Some(Ok(it_r)))
             }
         }
     }
 
     fn next(&mut self) -> PairResult<T> {
-        let it_el = self.iter.next();
-        self.update_current_and_decode(it_el)
+        match self.current.clone() {
+            CursorIt::Start(_) => self.first(),
+            CursorIt::End(_) => Ok(None),
+            CursorIt::Key(_, Forward) => match self.iter.next() {
+                None => {
+                    self.current = CursorIt::End(Forward);
+                    Ok(None)
+                }
+                Some(Err(e)) => {
+                    Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
+                }
+                Some(Ok(n_el)) => {
+                    self.current = CursorIt::Key(n_el.0.clone(), Forward);
+                    decode::<T>(Some(Ok(n_el)))
+                }
+            },
+            CursorIt::Key(current_key, Reverse) => {
+                self.iter.set_mode(rocksdb::IteratorMode::From(&current_key, Forward));
+                self.current = CursorIt::Key(current_key, Forward);
+                self.next()
+            }
+        }
     }
 
     fn prev(&mut self) -> PairResult<T> {
         match self.current.clone() {
-            None => self.last(),
-            Some(current_key) => {
-                self.iter.set_mode(rocksdb::IteratorMode::From(
-                    &current_key,
-                    rocksdb::Direction::Reverse,
-                ));
-                let it_el = (|| {
+            CursorIt::Start(_) => self.last(), // TODO: should this be Ok(None)?
+            CursorIt::End(Forward) => {
+                self.current = CursorIt::End(Reverse);
+                self.prev()
+            }
+            CursorIt::End(Reverse) => {
+                self.iter.set_mode(rocksdb::IteratorMode::End);
+                match self.iter.next() {
+                    None => {
+                        self.iter.set_mode(rocksdb::IteratorMode::Start);
+                        self.current = CursorIt::Start(Forward);
+                        Ok(None)
+                    }
+                    Some(Err(e)) => Err(DatabaseError::Read(DatabaseErrorInfo {
+                        message: e.to_string(),
+                        code: 1,
+                    })),
+                    Some(Ok(r_el)) => {
+                        self.current = CursorIt::Key(r_el.0.clone(), Reverse);
+                        decode::<T>(Some(Ok(r_el)))
+                    }
+                }
+            }
+            CursorIt::Key(current_key, Reverse) => {
+                let n_it = (|| {
                     // Skips current_key
-                    let c_it_el = self.iter.next();
-                    if let Some(Ok(c_it_kv)) = c_it_el {
-                        if c_it_kv.0.clone() != current_key {
-                            return Some(Ok(c_it_kv));
+                    let c_it = self.iter.next();
+                    if let Some(Ok(c_it_el)) = c_it {
+                        if c_it_el.0 != current_key {
+                            return Some(Ok(c_it_el));
                         }
                     }
                     self.iter.next()
                 })();
-                let r = self.update_current_and_decode(it_el);
 
-                match self.current.clone() {
+                match n_it {
                     None => {
-                        self.iter.set_mode(rocksdb::IteratorMode::Start);
+                        self.current = CursorIt::Start(Reverse);
+                        Ok(None)
                     }
-                    Some(c) => {
-                        self.iter
-                            .set_mode(rocksdb::IteratorMode::From(&c, rocksdb::Direction::Forward));
-                        // Should we call next?
+                    Some(Err(e)) => Err(DatabaseError::Read(DatabaseErrorInfo {
+                        message: e.to_string(),
+                        code: 1,
+                    })),
+                    Some(Ok(it_el)) => {
+                        self.current = CursorIt::Key(it_el.0.clone(), Reverse);
+                        decode::<T>(Some(Ok(it_el)))
                     }
                 }
-                r
+            }
+            CursorIt::Key(current_key, Forward) => {
+                self.iter.set_mode(rocksdb::IteratorMode::From(
+                    &current_key,
+                    rocksdb::Direction::Reverse,
+                ));
+                self.current = CursorIt::Key(current_key, Reverse);
+                self.prev()
             }
         }
     }
 
     fn last(&mut self) -> PairResult<T> {
         self.iter.set_mode(rocksdb::IteratorMode::End);
-        let last_el = self.iter.next();
-        let r = self.update_current_and_decode(last_el);
-        match self.current.clone() {
+        match self.iter.next() {
             None => {
                 self.iter.set_mode(rocksdb::IteratorMode::Start);
+                self.current = CursorIt::End(Forward);
+                Ok(None)
             }
-            Some(c) => {
-                self.iter.set_mode(rocksdb::IteratorMode::From(&c, rocksdb::Direction::Forward));
+            Some(Err(e)) => {
+                Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
+            }
+            Some(Ok(last_el)) => {
+                self.current = CursorIt::Key(last_el.0.clone(), cursor_direction(&self.current));
+                self.iter
+                    .set_mode(rocksdb::IteratorMode::From(&last_el.0, rocksdb::Direction::Forward));
+                decode::<T>(Some(Ok(last_el)))
             }
         }
-        r
     }
 
     fn current(&mut self) -> PairResult<T> {
         match &self.current {
-            None => Ok(None),
-            Some(current_key) => {
+            CursorIt::Start(_) => {
+                Ok(None) // Should this not be first?
+            }
+            CursorIt::End(_) => Ok(None),
+            CursorIt::Key(current_key, _) => {
                 self.iter.set_mode(rocksdb::IteratorMode::From(
                     &current_key,
-                    rocksdb::Direction::Forward,
+                    cursor_direction(&self.current),
                 ));
-                // TODO: shouldn't this be just next()?
-                let it_el = self.iter.find(|res| match res {
-                    Err(_e) => false,
-                    Ok((k, _v)) => {
-                        return current_key.as_ref() == k.deref();
-                    }
-                });
+                let it_el = self.iter.next(); // Note that this might not be the same as
+                                              // self.current as it might have been deleted
+
+                // TODO: Note that the iter points at the next element now
+                // Not sure if we have to reposition it
+                self.iter.set_mode(rocksdb::IteratorMode::From(
+                    &current_key,
+                    cursor_direction(&self.current),
+                ));
+
                 decode::<T>(it_el)
             }
         }
@@ -264,17 +297,15 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
             Bound::Unbounded => None,
         };
 
-        match start_key {
-            None => self.iter.set_mode(rocksdb::IteratorMode::Start),
-            Some(key) => {
-                self.iter.set_mode(rocksdb::IteratorMode::From(
-                    key.encode().as_ref(),
-                    rocksdb::Direction::Forward,
-                ));
+        let start_item = match start_key {
+            None => {
+                self.iter.set_mode(rocksdb::IteratorMode::Start);
+                self.current = CursorIt::Start(Forward);
+                self.next().transpose()
             }
+            Some(key) => self.seek(key).transpose(),
         };
 
-        let start_item = self.next().transpose();
         Ok(RangeWalker::new(self, start_item, range.end_bound().cloned()))
     }
 
@@ -283,8 +314,12 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
         start_key: Option<T::Key>,
     ) -> Result<ReverseWalker<'_, T, Self>, DatabaseError> {
         let start: IterPairResult<T> = match start_key {
+            None => {
+                self.iter.set_mode(rocksdb::IteratorMode::End);
+                self.current = CursorIt::End(Reverse);
+                self.prev().transpose()
+            }
             Some(key) => self.seek(key).transpose(),
-            None => self.last().transpose(),
         };
         Ok(ReverseWalker::new(self, start))
     }
@@ -292,70 +327,108 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
 
 impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
     fn next_dup(&mut self) -> PairResult<T> {
-        if self.current.is_none() {
-            return self.next();
-        }
+        match self.current.clone() {
+            CursorIt::Start(Forward) => self.next(),
+            CursorIt::Start(Reverse) => {
+                self.iter.set_mode(rocksdb::IteratorMode::Start);
+                self.current = CursorIt::Start(Forward);
+                self.next_dup()
+            }
+            CursorIt::End(_) => Ok(None),
+            CursorIt::Key(current_key, Forward) => {
+                match self.iter.next() {
+                    None => {
+                        self.current = CursorIt::End(Forward);
+                        Ok(None)
+                    }
+                    Some(Err(e)) => Err(DatabaseError::Read(DatabaseErrorInfo {
+                        message: e.to_string(),
+                        code: 1,
+                    })),
+                    Some(Ok(n_el)) => {
+                        self.current = CursorIt::Key(n_el.0.clone(), Forward);
 
-        let current_key = self.current.clone().unwrap();
-        match self.next() {
-            Err(e) => Err(e),
-            Ok(None) => Ok(None),
-            Ok(Some(nv)) => {
-                let encoded_key = nv.0.clone().encode();
-                match encoded_key.as_ref()
-                    == current_key.as_ref().split_at(encoded_key.as_ref().len()).0
-                {
-                    true => Ok(Some(nv)),
-                    false => Ok(None), // Next primary key, return None indicating we are done
-                                       // iterating
+                        let current_primary = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
+                            current_key.into_vec(),
+                        );
+                        let n_el_primary = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
+                            n_el.0.clone().into_vec(),
+                        );
+                        match current_primary == n_el_primary {
+                            true => decode::<T>(Some(Ok(n_el))),
+                            false => Ok(None), // Next primary key, return None indicating we are done
+                                               // iterating
+                        }
+                    }
                 }
+            }
+            CursorIt::Key(current_key, Reverse) => {
+                self.iter.set_mode(rocksdb::IteratorMode::From(current_key.as_ref(), Forward));
+                self.current = CursorIt::Key(current_key.clone(), Forward);
+                // TODO: should we call next to skip current?
+                self.next_dup()
             }
         }
     }
 
     fn next_no_dup(&mut self) -> PairResult<T> {
-        if self.current.is_none() {
-            return self.next();
-        }
+        match self.current.clone() {
+            CursorIt::Start(Forward) => self.next(),
+            CursorIt::Start(Reverse) => {
+                self.iter.set_mode(rocksdb::IteratorMode::Start);
+                self.current = CursorIt::Start(Forward);
+                self.next()
+            }
+            CursorIt::End(_) => Ok(None),
+            CursorIt::Key(current_key, Forward) => {
+                self.iter.set_mode(rocksdb::IteratorMode::From(
+                    &current_key,
+                    rocksdb::Direction::Forward,
+                ));
 
-        let current_key = self.current.clone().unwrap();
-        loop {
-            //TODO: should be a seek
-            let (stop, ni) = match self.next() {
-                Err(e) => (true, Err(e)),
-                Ok(None) => (true, Ok(None)),
-                Ok(Some(nv)) => {
-                    let encoded_key = nv.0.clone().encode();
-                    match encoded_key.as_ref()
-                        == current_key.as_ref().split_at(encoded_key.as_ref().len()).0
-                    {
-                        true => (false, Ok(None)), // Still the same primary key, continue
-                        false => (true, Ok(Some(nv))),
+                let current_primary_as_bytes = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
+                    current_key.clone().into_vec(),
+                )
+                .encode();
+
+                let first_after_current_it = self.iter.find(|res| match res {
+                    Err(_e) => false,
+                    Ok((k, _v)) => {
+                        current_primary_as_bytes.as_ref()
+                            < k.as_ref().split_at(current_key.as_ref().len()).0
+                    }
+                });
+
+                match first_after_current_it {
+                    None => {
+                        self.current = CursorIt::End(Forward);
+                        Ok(None)
+                    }
+                    Some(Err(e)) => Err(DatabaseError::Read(DatabaseErrorInfo {
+                        message: e.to_string(),
+                        code: 1,
+                    })),
+                    Some(Ok(first_after_current_el)) => {
+                        self.current = CursorIt::Key(first_after_current_el.0.clone(), Forward);
+                        decode::<T>(Some(Ok(first_after_current_el)))
                     }
                 }
-            };
-            if stop {
-                return ni;
+            }
+            CursorIt::Key(current_key, Reverse) => {
+                self.iter.set_mode(rocksdb::IteratorMode::From(current_key.as_ref(), Forward));
+                self.current = CursorIt::Key(current_key.clone(), Forward);
+                // TODO: should we call next to skip current?
+                self.next_no_dup()
             }
         }
     }
 
     fn next_dup_val(&mut self) -> ValueOnlyResult<T> {
-        let current_key = self.current.clone();
-        match self.next() {
+        // TODO: this is not correctly implemented for non-unique composite (primary, sub), might break bundle state provider
+        match self.next_dup() {
             Err(e) => Err(e),
             Ok(None) => Ok(None),
-            Ok(Some((k, v))) => match current_key {
-                None => Ok(Some(v)),
-                Some(mk) => {
-                    let encoded_key = k.encode();
-                    match encoded_key.as_ref() == mk.as_ref().split_at(encoded_key.as_ref().len()).0
-                    {
-                        true => Ok(Some(v)),
-                        false => Ok(None),
-                    }
-                }
-            },
+            Ok(Some(n_el)) => Ok(Some(n_el.1.into())),
         }
     }
 
@@ -371,22 +444,18 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         self.iter
             .set_mode(rocksdb::IteratorMode::From(ext_key.as_slice(), rocksdb::Direction::Forward));
 
-        let it_el = self.iter.find(|res| match res {
-            Err(_e) => false,
-            Ok((k, _v)) => {
-                return ext_key.as_slice() <= k.as_ref();
-            }
-        });
-        match it_el {
+        match self.iter.next() {
             None => {
-                self.current = Some(ext_key.into());
+                self.current = CursorIt::End(Forward);
                 Ok(None)
             }
             Some(Err(e)) => {
+                let next_current = change_direction_if_needed(self.current.clone(), Forward);
+                self.current = next_current;
                 Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
             }
             Some(Ok(it_r)) => {
-                self.current = Some(it_r.0.clone());
+                self.current = CursorIt::Key(it_r.0.clone(), Forward);
                 if encoded_key.as_ref() == it_r.0.as_ref().split_at(encoded_key.as_ref().len()).0 {
                     return decode_value::<T>(Some(Ok(it_r)));
                 }
@@ -400,26 +469,19 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         _key: Option<<T>::Key>,
         _subkey: Option<<T as DupSort>::SubKey>,
     ) -> Result<DupWalker<'_, T, Self>, DatabaseError> {
-        if _key.is_none() {
-            self.iter.set_mode(rocksdb::IteratorMode::Start);
-        } else {
-            // TODO: add format key from key, subkey for dup table type!
-            let encoded_key = _key.unwrap().encode();
-            if _subkey.is_none() {
-                self.iter.set_mode(rocksdb::IteratorMode::From(
-                    encoded_key.as_ref(),
-                    rocksdb::Direction::Forward,
-                ));
+        let start_el = match (_key, _subkey) {
+            (None, _) => self.first(),
+            (Some(key), None) => self.seek(key),
+            (Some(key), Some(subkey)) => {
+                let mut ext_key: Vec<u8> = key.encode().as_ref().into();
+                let subkey_vec: Vec<u8> = subkey.encode().as_ref().into();
+                ext_key.extend_from_slice(subkey_vec.as_slice());
+                self.iter.set_mode(rocksdb::IteratorMode::From(&ext_key, Forward));
+                self.current = CursorIt::Key(ext_key.into(), Forward);
+                self.next()
             }
-            let mut ext_key: Vec<u8> = encoded_key.as_ref().into();
-            let subkey_vec: Vec<u8> = _subkey.unwrap().encode().as_ref().into();
-            ext_key.extend_from_slice(subkey_vec.as_slice());
-            self.iter.set_mode(rocksdb::IteratorMode::From(
-                ext_key.as_slice(),
-                rocksdb::Direction::Forward,
-            ));
-        }
-        Ok(DupWalker { cursor: self, start: None })
+        };
+        Ok(DupWalker { cursor: self, start: start_el.transpose() })
     }
 }
 
@@ -430,10 +492,10 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
         _value: <T as Table>::Value,
     ) -> Result<(), DatabaseError> {
         // in rocksdb its always an upsert
-        let ext_key =
-            Some(<T as KeyFormat<T::Key, T::Value>>::format_key(_key.clone(), &_value).into());
+        let ext_key = <T as KeyFormat<T::Key, T::Value>>::format_key(_key.clone(), &_value);
         self.tx.put::<T>(_key, _value)?;
-        self.current = ext_key;
+        self.iter.set_mode(rocksdb::IteratorMode::From(&ext_key, cursor_direction(&self.current)));
+        self.current = CursorIt::Key(ext_key.into(), cursor_direction(&self.current));
         Ok(())
     }
 
@@ -488,15 +550,15 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
     }
 
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
-        match self.current.clone() {
-            None => {
-                panic!("should never happen")
-            }
-            Some(ck) => {
+        match &self.current {
+            CursorIt::Start(_) => panic!("should never happen"),
+            CursorIt::End(_) => panic!("should never happen"),
+            CursorIt::Key(ck, _) => {
                 let locked_opt_tx = self.tx.inner.lock().unwrap();
                 let tx = locked_opt_tx.as_ref().unwrap();
                 let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
+                // TODO: what should happen to self.current?
                 let _ = tx.delete_cf(cf_handle, &ck);
                 Ok(())
             }
@@ -510,24 +572,40 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
     }
 
     fn append_dup(&mut self, _key: <T>::Key, _value: <T>::Value) -> Result<(), DatabaseError> {
-        match self.current.clone() {
-            None => {
-                let last_el = self.last(); // TODO: last for this primary key?
-                match last_el {
-                    Err(e) => Err(DatabaseWriteError {
-                        info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
-                        operation: DatabaseWriteOperation::CursorAppendDup,
-                        table_name: T::NAME,
-                        key: _key.encode().into(),
-                    }
-                    .into()),
-                    Ok(None) => self.upsert(_key, _value),
-                    Ok(Some(_item)) => self.append_dup(_key, _value),
-                }
+        self.iter.set_mode(rocksdb::IteratorMode::End); // TODO: should be from current if set
+        self.current = CursorIt::Start(Reverse);
+
+        let encoded_key = _key.clone().encode();
+        let _ = self.iter.find(|res| match res {
+            Err(_e) => false,
+            Ok((k, _v)) => {
+                encoded_key.as_ref() >= k.as_ref().split_at(encoded_key.as_ref().len()).0
             }
-            Some(ck) => {
-                let ext_key = <T as KeyFormat<T::Key, T::Value>>::format_key(_key.clone(), &_value);
-                if ck.split_at(ext_key.len()).0 > ext_key.as_slice() {
+        });
+
+        let last_subkey_it = self.iter.next();
+
+        match last_subkey_it {
+            None => self.upsert(_key, _value),
+            Some(Err(e)) => Err(DatabaseWriteError {
+                info: DatabaseErrorInfo { message: e.into_string(), code: 1 },
+                operation: DatabaseWriteOperation::CursorAppendDup,
+                table_name: T::NAME,
+                key: _key.encode().into(),
+            }
+            .into()),
+            Some(Ok(last_subkey_el)) => {
+                // Check if same primary, if not just append
+                let ls_el_primary = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
+                    last_subkey_el.0.clone().into_vec(),
+                );
+                if ls_el_primary != _key {
+                    return self.upsert(_key, _value);
+                }
+
+                let ext_key =
+                    <T as KeyFormat<T::Key, T::Value>>::format_key(_key.clone(), &_value).into();
+                if last_subkey_el.0 > ext_key {
                     return Err(DatabaseWriteError {
                         info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
                         operation: DatabaseWriteOperation::CursorAppendDup,
@@ -536,7 +614,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                     }
                     .into());
                 }
-                self.upsert(_key, _value)
+                return self.upsert(_key, _value);
             }
         }
     }

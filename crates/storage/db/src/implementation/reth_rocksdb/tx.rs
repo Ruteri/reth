@@ -158,6 +158,25 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
     }
 
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
+        /*
+        self.db.drop_cf(T::NAME).map_err(|e| {
+            DatabaseError::Delete(DatabaseErrorInfo { message: e.to_string(), code: 1 })
+        })?;
+        self.db.create_cf(T::NAME, &rocksdb::Options::default()).map_err(|e| {
+            DatabaseError::CreateTable(DatabaseErrorInfo { message: e.to_string(), code: 1 })
+        })
+        */
+
+        /* This is extremely inefficient, workaround for the db not being mutable */
+        let locked_opt_tx = self.inner.lock().unwrap();
+        let tx = locked_opt_tx.as_ref().unwrap();
+        let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
+        let mut it = tx.raw_iterator_cf(cf_handle);
+        it.seek_to_first();
+        while let Some(key) = it.key() {
+            let _ = tx.delete_cf(cf_handle, key);
+            it.next();
+        }
         Ok(())
     }
 

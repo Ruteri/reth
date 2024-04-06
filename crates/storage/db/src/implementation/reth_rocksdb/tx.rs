@@ -45,9 +45,12 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let locked_inner = self.inner.lock().unwrap();
         if T::TABLE.is_dupsort() {
             let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
-            let mut it = locked_inner.as_ref().unwrap().prefix_iterator_cf(cf_handle, key.encode());
-
-            return reth_rocksdb::cursor::decode_value::<T>(it.next());
+            let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(cf_handle);
+            it.seek(key.encode());
+            return match it.value() {
+                None => Ok(None),
+                Some(v) => reth_rocksdb::cursor::decode_value::<T>(v),
+            };
         } else {
             locked_inner
                 .as_ref()
@@ -85,10 +88,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(
-                escaping_tx_ref.iterator_cf(cf_handle, rocksdb::IteratorMode::Start),
-                &*raw_self_ptr,
-            ))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
         }
     }
 
@@ -100,12 +100,12 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, rocksdb::TransactionDB>;
         let raw_self_ptr = self as *const Self;
 
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_total_order_seek(true);
+
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(
-                escaping_tx_ref.full_iterator_cf(cf_handle, rocksdb::IteratorMode::Start),
-                &*raw_self_ptr,
-            ))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
         }
     }
 
@@ -190,10 +190,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(
-                escaping_tx_ref.iterator_cf(cf_handle, rocksdb::IteratorMode::Start),
-                &*raw_self_ptr,
-            ))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
         }
     }
 
@@ -205,12 +202,12 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, rocksdb::TransactionDB>;
         let raw_self_ptr = self as *const Self;
 
+        let mut opts = rocksdb::ReadOptions::default();
+        opts.set_total_order_seek(true);
+
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(
-                escaping_tx_ref.full_iterator_cf(cf_handle, rocksdb::IteratorMode::Start),
-                &*raw_self_ptr,
-            ))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
         }
     }
 }

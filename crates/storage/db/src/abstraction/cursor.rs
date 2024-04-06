@@ -167,7 +167,10 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Iterator for Walker<'cursor, T, C
 
 impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Walker<'cursor, T, CURSOR> {
     /// construct Walker
-    pub fn new(cursor: &'cursor mut CURSOR, start: IterPairResult<T>) -> Self {
+    pub fn new(cursor: &'cursor mut CURSOR, mut start: IterPairResult<T>) -> Self {
+        if start.is_none() {
+            start = cursor.first().transpose();
+        }
         Self { cursor, start }
     }
 
@@ -209,7 +212,10 @@ where
 
 impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR> {
     /// construct ReverseWalker
-    pub fn new(cursor: &'cursor mut CURSOR, start: IterPairResult<T>) -> Self {
+    pub fn new(cursor: &'cursor mut CURSOR, mut start: IterPairResult<T>) -> Self {
+        if start.is_none() {
+            start = cursor.last().transpose();
+        }
         Self { cursor, start }
     }
 

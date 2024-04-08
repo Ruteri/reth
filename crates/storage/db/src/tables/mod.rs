@@ -113,6 +113,14 @@ macro_rules! dedup_table {
         }
     };
     ($name:ident<Key = $key:ty, Value = $value:ty, SubKey = $subkey:ty>) => {
+        impl $crate::table::DupKeyFormat<$key, $subkey> for $name {
+            fn format_composite_key(k: $key, sk: $subkey) -> Vec<u8> {
+                let mut ext_key: Vec<u8> = Encode::encode(k).into();
+                ext_key.extend_from_slice(Encode::encode(sk).as_ref());
+                ext_key
+            }
+        }
+
         impl DupSort for $name {
             type SubKey = $subkey;
         }

@@ -214,33 +214,31 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         match self.state {
             CursorIt::Start => self.first(),
             CursorIt::End => Ok(None),
-            CursorIt::Iterating => {
-                match self.iter.item() {
-                    None => self.next(),
-                    Some(prev_item) => {
-                        let prev_primary =
-                            <T as KeyFormat<T::Key, T::Value>>::unformat_key(prev_item.0.to_vec());
-                        self.iter.next();
-                        match self.iter.item() {
-                            None => {
-                                self.state = CursorIt::End;
+            CursorIt::Iterating => match self.iter.item() {
+                None => self.next(),
+                Some(prev_item) => {
+                    let prev_primary =
+                        <T as KeyFormat<T::Key, T::Value>>::unformat_key(prev_item.0.to_vec());
+                    self.iter.next();
+                    match self.iter.item() {
+                        None => {
+                            self.state = CursorIt::End;
+                            Ok(None)
+                        }
+                        Some(el) => {
+                            self.state = CursorIt::Iterating;
+                            let el_primary = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
+                                el.0.clone().to_vec(),
+                            );
+                            if prev_primary == el_primary {
+                                decode_item::<T>(Some(el))
+                            } else {
                                 Ok(None)
-                            }
-                            Some(el) => {
-                                self.state = CursorIt::Iterating;
-                                let el_primary = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
-                                    el.0.clone().to_vec(),
-                                );
-                                match prev_primary == el_primary {
-                                    true => decode_item::<T>(Some(el)),
-                                    false => Ok(None), // Next primary key, return None indicating we are done
-                                                       // iterating
-                                }
                             }
                         }
                     }
                 }
-            }
+            },
         }
     }
 
@@ -293,12 +291,8 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         _key: <T as Table>::Key,
         _subkey: <T as DupSort>::SubKey,
     ) -> ValueOnlyResult<T> {
-        let encoded_key = _key.encode();
-        let mut ext_key: Vec<u8> = encoded_key.as_ref().into();
-        let subkey_vec: Vec<u8> = _subkey.encode().as_ref().into();
-        ext_key.extend_from_slice(subkey_vec.as_slice());
-
-        self.iter.seek(ext_key.as_slice());
+        let ext_key = T::format_composite_key(_key.clone(), _subkey.clone());
+        self.iter.seek(&ext_key);
 
         match self.iter.item() {
             None => {
@@ -307,6 +301,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             }
             Some(el) => {
                 self.state = CursorIt::Iterating;
+                let encoded_key = _key.encode();
                 if encoded_key.as_ref() != el.0.as_ref().split_at(encoded_key.as_ref().len()).0 {
                     return Ok(None);
                 }
@@ -321,12 +316,13 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         _subkey: Option<<T as DupSort>::SubKey>,
     ) -> Result<DupWalker<'_, T, Self>, DatabaseError> {
         let start_el = match (_key, _subkey) {
-            (None, _) => self.first(),
+            (None, None) => self.first(),
+            (None, Some(subkey)) => {
+                panic!("not implemented");
+            }
             (Some(key), None) => self.seek(key),
             (Some(key), Some(subkey)) => {
-                let mut ext_key: Vec<u8> = key.encode().as_ref().into();
-                let subkey_vec: Vec<u8> = subkey.encode().as_ref().into();
-                ext_key.extend_from_slice(subkey_vec.as_slice());
+                let ext_key = T::format_composite_key(key.clone(), subkey.clone().into());
                 self.iter.seek(&ext_key);
                 match self.iter.item() {
                     None => {
@@ -356,6 +352,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
         self.iter.seek(&ext_key);
         match self.iter.item() {
             None => {
+                panic!("could not find item we just put");
                 self.state = CursorIt::End;
             }
             Some(el) => {

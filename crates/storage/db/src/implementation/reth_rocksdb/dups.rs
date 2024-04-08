@@ -1,6 +1,6 @@
 use crate::{
-    table::{Decode, Encode, KeyFormat, Table},
-    tables::{self},
+    table::{Decode, DupKeyFormat, DupSort, Encode, KeyFormat, Table},
+    tables,
 };
 
 use reth_primitives::BlockNumber;
@@ -15,9 +15,10 @@ impl
         k: <tables::PlainStorageState as Table>::Key,
         v: &<tables::PlainStorageState as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
-        primary_key.extend_from_slice(v.key.as_slice());
-        primary_key
+        <tables::PlainStorageState as DupKeyFormat<
+            <tables::PlainStorageState as Table>::Key,
+            <tables::PlainStorageState as DupSort>::SubKey,
+        >>::format_composite_key(k, v.key.clone())
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::PlainStorageState as Table>::Key {
@@ -36,9 +37,10 @@ impl
         k: <tables::AccountChangeSets as Table>::Key,
         v: &<tables::AccountChangeSets as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
-        primary_key.extend_from_slice(&v.address.into_array());
-        primary_key
+        <tables::AccountChangeSets as DupKeyFormat<
+            <tables::AccountChangeSets as Table>::Key,
+            <tables::AccountChangeSets as DupSort>::SubKey,
+        >>::format_composite_key(k, v.address.clone())
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::AccountChangeSets as Table>::Key {
@@ -56,9 +58,10 @@ impl
         k: <tables::StorageChangeSets as Table>::Key,
         v: &<tables::StorageChangeSets as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
-        primary_key.extend_from_slice(&v.key.0);
-        primary_key
+        <tables::StorageChangeSets as DupKeyFormat<
+            <tables::StorageChangeSets as Table>::Key,
+            <tables::StorageChangeSets as DupSort>::SubKey,
+        >>::format_composite_key(k, v.key.clone())
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::StorageChangeSets as Table>::Key {
@@ -76,9 +79,10 @@ impl KeyFormat<<tables::HashedStorages as Table>::Key, <tables::HashedStorages a
         k: <tables::HashedStorages as Table>::Key,
         v: &<tables::HashedStorages as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
-        primary_key.extend_from_slice(&v.key.0);
-        primary_key
+        <tables::HashedStorages as DupKeyFormat<
+            <tables::HashedStorages as Table>::Key,
+            <tables::HashedStorages as DupSort>::SubKey,
+        >>::format_composite_key(k, v.key.clone())
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::HashedStorages as Table>::Key {
@@ -90,12 +94,13 @@ impl KeyFormat<<tables::StoragesTrie as Table>::Key, <tables::StoragesTrie as Ta
     for tables::StoragesTrie
 {
     fn format_key(
-        k: <tables::HashedStorages as Table>::Key,
+        k: <tables::StoragesTrie as Table>::Key,
         v: &<tables::StoragesTrie as Table>::Value,
     ) -> Vec<u8> {
-        let mut primary_key: Vec<u8> = k.encode().as_ref().into();
-        primary_key.extend_from_slice(&v.nibbles.0);
-        primary_key
+        <tables::StoragesTrie as DupKeyFormat<
+            <tables::StoragesTrie as Table>::Key,
+            <tables::StoragesTrie as DupSort>::SubKey,
+        >>::format_composite_key(k, v.nibbles.clone())
     }
 
     fn unformat_key(raw_key: Vec<u8>) -> <tables::StoragesTrie as Table>::Key {

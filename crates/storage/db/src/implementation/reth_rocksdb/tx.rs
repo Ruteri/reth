@@ -146,15 +146,11 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         let tx = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        if T::TABLE.is_dupsort() && _value.is_some() {
-            let ext_key =
-                <T as KeyFormat<T::Key, T::Value>>::format_key(_key, _value.as_ref().unwrap());
-            let _ = tx.delete_cf(cf_handle, ext_key.as_slice());
-            Ok(true)
-        } else {
-            let _ = tx.delete_cf(cf_handle, _key.encode().as_ref());
-            Ok(true)
-        }
+        let _ = match _value {
+            None => tx.delete_cf(cf_handle, _key.encode().as_ref()),
+            Some(value) => tx.delete_cf(cf_handle, &T::format_key(_key, &value)),
+        };
+        Ok(true)
     }
 
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {

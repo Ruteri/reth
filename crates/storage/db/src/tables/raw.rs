@@ -1,5 +1,7 @@
 use crate::{
-    table::{Compress, Decode, Decompress, DupSort, Encode, Key, KeyFormat, Table, Value},
+    table::{
+        Compress, Decode, Decompress, DupKeyFormat, DupSort, Encode, Key, KeyFormat, Table, Value,
+    },
     DatabaseError,
 };
 use serde::{Deserialize, Serialize};
@@ -37,6 +39,20 @@ impl<T: Table> Table for RawTable<T> {
 #[derive(Default, Copy, Clone, Debug)]
 pub struct RawDupSort<T: DupSort> {
     phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: DupSort> DupKeyFormat<<RawDupSort<T> as Table>::Key, <RawDupSort<T> as DupSort>::SubKey>
+    for RawDupSort<T>
+{
+    fn format_composite_key(
+        k: <RawTable<T> as Table>::Key,
+        sk: <RawDupSort<T> as DupSort>::SubKey,
+    ) -> Vec<u8> {
+        <T as DupKeyFormat<T::Key, T::SubKey>>::format_composite_key(
+            k.key().unwrap(),
+            sk.key().unwrap(),
+        )
+    }
 }
 
 impl<T: DupSort> KeyFormat<<RawDupSort<T> as Table>::Key, <RawDupSort<T> as Table>::Value>

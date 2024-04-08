@@ -75,6 +75,10 @@ pub trait KeyFormat<K: Key, V: Value> {
     fn unformat_key(raw_key: Vec<u8>) -> K;
 }
 
+pub trait DupKeyFormat<K: Key, SK: Key> {
+    fn format_composite_key(k: K, sk: SK) -> Vec<u8>;
+}
+
 /// Generic trait that a database table should follow.
 ///
 /// The [`Table::Key`] and [`Table::Value`] types should implement [`Encode`] and
@@ -105,7 +109,7 @@ pub type TableRow<T> = (<T as Table>::Key, <T as Table>::Value);
 /// DupSort allows for keys to be repeated in the database.
 ///
 /// Upstream docs: <https://libmdbx.dqdkfa.ru/usage.html#autotoc_md48>
-pub trait DupSort: Table {
+pub trait DupSort: Table + DupKeyFormat<Self::Key, Self::SubKey> {
     /// The table subkey. This type must implement [`Encode`] and [`Decode`].
     ///
     /// Sorting should be taken into account when encoding this.

@@ -35,6 +35,29 @@ impl<'db> Tx<'db, rocksdb::TransactionDB> {
     ) -> Self {
         Self { inner: Mutex::new(Some(inner)), db }
     }
+
+    pub fn get_with_value<T: Table>(
+        &self,
+        key: T::Key,
+        value: &T::Value,
+    ) -> Result<Option<T::Value>, DatabaseError> {
+        let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
+        let ext_key = T::format_key(key.clone(), value);
+
+        let locked_inner = self.inner.lock().unwrap();
+        let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(cf_handle);
+        it.seek(&ext_key);
+        return match it.item() {
+            None => Ok(None),
+            Some(el) => {
+                if ext_key == el.0 {
+                    reth_rocksdb::cursor::decode_value::<T>(el.1)
+                } else {
+                    Ok(None)
+                }
+            }
+        };
+    }
 }
 
 impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
@@ -46,10 +69,17 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         if T::TABLE.is_dupsort() {
             let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
             let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(cf_handle);
-            it.seek(key.encode());
-            return match it.value() {
+            let encoded_key = key.clone().encode();
+            it.seek(&encoded_key);
+            return match it.item() {
                 None => Ok(None),
-                Some(v) => reth_rocksdb::cursor::decode_value::<T>(v),
+                Some(el) => {
+                    if key == T::unformat_key(el.0.to_vec()) {
+                        reth_rocksdb::cursor::decode_value::<T>(el.1)
+                    } else {
+                        Ok(None)
+                    }
+                }
             };
         } else {
             locked_inner

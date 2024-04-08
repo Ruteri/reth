@@ -445,7 +445,30 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
 
 impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
     fn delete_current_duplicates(&mut self) -> Result<(), DatabaseError> {
-        Ok(()) // NOOP in rocksdb
+        match self.state {
+            CursorIt::Start => Ok(()),
+            CursorIt::End => Ok(()),
+            CursorIt::Iterating => {
+                let current_primary = T::unformat_key(self.iter.key().unwrap().to_vec());
+                let current_primary_encoded = current_primary.clone().encode();
+                let _ = self.iter.seek(&current_primary_encoded);
+
+                let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
+
+                let locked_opt_tx = self.tx.inner.lock().unwrap();
+                let tx = locked_opt_tx.as_ref().unwrap();
+
+                while let Some(key) = self.iter.key() {
+                    if T::unformat_key(key.to_vec()) != current_primary {
+                        break;
+                    }
+
+                    let _ = tx.delete_cf(cf_handle, key);
+                    self.iter.next();
+                }
+                return Ok(());
+            }
+        }
     }
 
     fn append_dup(&mut self, _key: <T>::Key, _value: <T>::Value) -> Result<(), DatabaseError> {

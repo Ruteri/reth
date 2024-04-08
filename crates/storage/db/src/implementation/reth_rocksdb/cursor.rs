@@ -78,21 +78,7 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
     }
 
     fn seek_exact(&mut self, _key: T::Key) -> PairResult<T> {
-        let encoded_key = _key.clone().encode();
-        self.iter.seek(encoded_key.as_ref());
-        match self.iter.item() {
-            None => {
-                self.state = CursorIt::End;
-                Ok(None)
-            }
-            Some(el) => {
-                self.state = CursorIt::Iterating;
-                match encoded_key.as_ref() == el.0.as_ref().split_at(encoded_key.as_ref().len()).0 {
-                    true => decode_item::<T>(Some(el)),
-                    false => Ok(None),
-                }
-            }
-        }
+        Ok(self.seek(_key.clone())?.filter(|el| el.0 == _key))
     }
 
     fn seek(&mut self, _key: T::Key) -> PairResult<T> {
@@ -217,26 +203,8 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             CursorIt::Iterating => match self.iter.item() {
                 None => self.next(),
                 Some(prev_item) => {
-                    let prev_primary =
-                        <T as KeyFormat<T::Key, T::Value>>::unformat_key(prev_item.0.to_vec());
-                    self.iter.next();
-                    match self.iter.item() {
-                        None => {
-                            self.state = CursorIt::End;
-                            Ok(None)
-                        }
-                        Some(el) => {
-                            self.state = CursorIt::Iterating;
-                            let el_primary = <T as KeyFormat<T::Key, T::Value>>::unformat_key(
-                                el.0.clone().to_vec(),
-                            );
-                            if prev_primary == el_primary {
-                                decode_item::<T>(Some(el))
-                            } else {
-                                Ok(None)
-                            }
-                        }
-                    }
+                    let prev_primary = T::unformat_key(prev_item.0.to_vec());
+                    Ok(self.next()?.filter(|el| prev_primary == el.0))
                 }
             },
         }
@@ -253,16 +221,14 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
                 }
 
                 let mut prev_primary_plus_one: Vec<u8> =
-                    <T as KeyFormat<T::Key, T::Value>>::unformat_key(prev_item.unwrap().0.to_vec())
-                        .encode()
-                        .into();
+                    T::unformat_key(prev_item.unwrap().0.to_vec()).encode().into();
                 for i in prev_primary_plus_one.len()..1 {
                     if prev_primary_plus_one[i - 1] != u8::max_value() {
                         prev_primary_plus_one[i - 1] = prev_primary_plus_one[i - 1] + 1;
                     }
                 }
 
-                self.iter.seek(prev_primary_plus_one);
+                self.iter.seek(&prev_primary_plus_one);
                 match self.iter.item() {
                     None => {
                         self.state = CursorIt::End;
@@ -279,11 +245,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
 
     fn next_dup_val(&mut self) -> ValueOnlyResult<T> {
         // TODO: this is not correctly implemented for non-unique composite (primary, sub), might break bundle state provider
-        match self.next_dup() {
-            Err(e) => Err(e),
-            Ok(None) => Ok(None),
-            Ok(Some(n_el)) => Ok(Some(n_el.1.into())),
-        }
+        Ok(self.next_dup()?.map(|el| el.1.into()))
     }
 
     fn seek_by_key_subkey(
@@ -301,11 +263,11 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             }
             Some(el) => {
                 self.state = CursorIt::Iterating;
-                let encoded_key = _key.encode();
-                if encoded_key.as_ref() != el.0.as_ref().split_at(encoded_key.as_ref().len()).0 {
-                    return Ok(None);
+                if T::unformat_key(el.0.to_vec()) == _key {
+                    decode_value::<T>(el.1)
+                } else {
+                    Ok(None)
                 }
-                decode_value::<T>(el.1)
             }
         }
     }
@@ -397,8 +359,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
             .into()),
             Ok(None) => self.upsert(_key, _value),
             Ok(Some(_item)) => {
-                let ext_key = _key.clone().encode();
-                if _item.0.encode().as_ref() > ext_key.as_ref() {
+                if _item.0 > _key {
                     return Err(DatabaseWriteError {
                         info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
                         operation: DatabaseWriteOperation::CursorAppend,
@@ -449,23 +410,49 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
             CursorIt::Start => Ok(()),
             CursorIt::End => Ok(()),
             CursorIt::Iterating => {
-                let current_primary = T::unformat_key(self.iter.key().unwrap().to_vec());
+                let start_ext_key = self.iter.key().unwrap().to_vec();
+                let current_primary = T::unformat_key(start_ext_key.clone());
                 let current_primary_encoded = current_primary.clone().encode();
-                let _ = self.iter.seek(&current_primary_encoded);
 
                 let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-                let locked_opt_tx = self.tx.inner.lock().unwrap();
-                let tx = locked_opt_tx.as_ref().unwrap();
-
+                let mut to_delete: Vec<Vec<u8>> = Vec::new();
+                // Schedule deleting preceeding
+                self.iter.prev();
                 while let Some(key) = self.iter.key() {
-                    if T::unformat_key(key.to_vec()) != current_primary {
+                    let key_as_vec = key.to_vec();
+                    if T::unformat_key(key_as_vec.clone()) != current_primary {
+                        break;
+                    }
+                    to_delete.push(key_as_vec);
+                    self.iter.prev();
+                }
+
+                // Schedule deleting current and subsequent
+                let _ = self.iter.seek(&start_ext_key);
+                while let Some(key) = self.iter.key() {
+                    let key_as_vec = key.to_vec();
+                    if T::unformat_key(key_as_vec.clone()) != current_primary {
                         break;
                     }
 
-                    let _ = tx.delete_cf(cf_handle, key);
+                    to_delete.push(key_as_vec);
                     self.iter.next();
                 }
+
+                let locked_opt_tx = self.tx.inner.lock().unwrap();
+                let tx = locked_opt_tx.as_ref().unwrap();
+                for key in to_delete {
+                    let _ = tx.delete_cf(cf_handle, key);
+                }
+
+                let _ = self.iter.seek(&start_ext_key);
+                if self.iter.valid() {
+                    self.state = CursorIt::Iterating;
+                } else {
+                    self.state = CursorIt::End;
+                }
+
                 return Ok(());
             }
         }
@@ -510,36 +497,6 @@ where
             })?;
             Ok(Some((key, value)))
         }
-    }
-}
-
-pub fn decode<T>(res: Option<Result<(Box<[u8]>, Box<[u8]>), rocksdb::Error>>) -> PairResult<T>
-where
-    T: Table,
-    T::Key: Decode,
-    T::Value: Decompress,
-{
-    match res {
-        None => Ok(None),
-        Some(r) => match r {
-            Err(e) => {
-                Err(DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 }))
-            }
-            Ok(item) => match T::TABLE.is_dupsort() {
-                true => {
-                    let key = <T as KeyFormat<T::Key, T::Value>>::unformat_key(item.0.into_vec());
-                    let value = decode_one::<T>(Cow::Owned(item.1.into_vec())).map_err(|e| {
-                        DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 })
-                    })?;
-                    Ok(Some((key, value)))
-                }
-                false => Some(decoder::<T>((
-                    Cow::Owned(item.0.into_vec()),
-                    Cow::Owned(item.1.into_vec()),
-                )))
-                .transpose(),
-            },
-        },
     }
 }
 

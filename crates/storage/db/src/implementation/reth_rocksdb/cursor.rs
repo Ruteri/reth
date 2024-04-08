@@ -459,6 +459,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
     }
 
     fn append_dup(&mut self, _key: <T>::Key, _value: <T>::Value) -> Result<(), DatabaseError> {
+        let current = self.iter.item();
         let mut prev_primary_plus_one: Vec<u8> = _key.clone().encode().as_ref().to_vec();
         for i in prev_primary_plus_one.len()..1 {
             if prev_primary_plus_one[i - 1] != u8::max_value() {
@@ -467,17 +468,28 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
         }
 
         self.iter.seek(prev_primary_plus_one);
+        if let Some(el) = self.iter.item() {
+            if T::unformat_key(el.0.to_vec()) != _key {
+                self.iter.prev();
+            }
+        }
 
         // upsert sets self.state
         match self.iter.item() {
             None => self.upsert(_key, _value),
-            Some(el) => Err(DatabaseWriteError {
-                info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
-                operation: DatabaseWriteOperation::CursorAppendDup,
-                table_name: T::NAME,
-                key: _key.encode().into(),
+            Some(el) => {
+                if el.0 > T::format_key(_key.clone(), &_value).as_slice() {
+                    Err(DatabaseWriteError {
+                        info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
+                        operation: DatabaseWriteOperation::CursorAppendDup,
+                        table_name: T::NAME,
+                        key: _key.encode().into(),
+                    }
+                    .into())
+                } else {
+                    Ok(())
+                }
             }
-            .into()),
         }
     }
 }

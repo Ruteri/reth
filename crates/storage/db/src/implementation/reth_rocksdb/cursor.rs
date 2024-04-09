@@ -383,10 +383,10 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
                     let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
                     let _ = tx.delete_cf(cf_handle, &key);
-                    self.iter.seek(key.to_vec().as_slice());
+                    self.iter.seek_for_prev(key.to_vec().as_slice());
                     match self.iter.item() {
                         None => {
-                            self.state = CursorIt::End;
+                            self.state = CursorIt::Start;
                         }
                         Some(_) => {
                             self.state = CursorIt::Iterating;
@@ -440,11 +440,11 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                     let _ = tx.delete_cf(cf_handle, key);
                 }
 
-                let _ = self.iter.seek(&start_ext_key);
+                let _ = self.iter.seek_for_prev(&start_ext_key);
                 if self.iter.valid() {
                     self.state = CursorIt::Iterating;
                 } else {
-                    self.state = CursorIt::End;
+                    self.state = CursorIt::Start;
                 }
 
                 return Ok(());

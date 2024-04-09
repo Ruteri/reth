@@ -193,7 +193,6 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
             false => T::format_key(_key.clone(), &_value),
             true => extend_composite_key(T::format_key(_key.clone(), &_value)),
         };
-        // println!("putting {}.{:?}:{:?}", T::NAME, &key, &_value);
         let value = _value.compress();
 
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();

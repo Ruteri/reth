@@ -1,10 +1,13 @@
 use crate::{
+    extend_composite_key,
     table::{Compress, DupSort, Encode, KeyFormat, Table, TableImporter},
     tables::utils::decode_one,
     transaction::{DbTx, DbTxMut},
-    DatabaseError,
+    unformat_extended_composite_key, DatabaseError,
 };
 
+use num_bigint;
+use num_traits;
 use std::sync::Mutex;
 
 use crate::reth_rocksdb;
@@ -17,7 +20,6 @@ use rocksdb;
 
 pub struct Tx<'db, DB> {
     pub inner: Mutex<Option<rocksdb::Transaction<'db, DB>>>,
-    // TODO: cache column families instead of getting them each time
     pub db: &'db DB,
 }
 
@@ -28,7 +30,6 @@ impl fmt::Debug for Tx<'_, rocksdb::TransactionDB> {
 }
 
 impl<'db> Tx<'db, rocksdb::TransactionDB> {
-    // TODO: cf handles
     pub fn new(
         inner: rocksdb::Transaction<'db, rocksdb::TransactionDB>,
         db: &'db rocksdb::TransactionDB,
@@ -105,10 +106,6 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
     fn abort(self) {}
 
     fn cursor_read<T: Table>(&self) -> Result<Self::Cursor<T>, DatabaseError> {
-        // Most likely incorrect. To be fixed!
-        // Cursor actually implements Sync trait, so I'm not sure if it's okay to get the raw
-        // reference to Transaction and leak it outisde the Mutex -- probably not and there's
-        // probably a better way to do it.
         let locked_opt_tx = self.inner.lock().unwrap();
         let tx_ref = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
@@ -140,7 +137,48 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
     }
 
     fn entries<T: Table>(&self) -> Result<usize, DatabaseError> {
-        Ok(0)
+        let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
+
+        let locked_opt_tx = self.inner.lock().unwrap();
+        let tx_ref = locked_opt_tx.as_ref().unwrap();
+
+        let opts = rocksdb::ReadOptions::default();
+        let mut it = tx_ref.raw_iterator_cf_opt(cf_handle, opts);
+        it.seek_to_last();
+        if !it.valid() {
+            return Ok(0);
+        }
+
+        let last_key_as_bigint =
+            num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, it.key().unwrap());
+
+        it.seek_to_first();
+        let first_el = it.item().unwrap();
+        let first_key_as_bigint =
+            num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, first_el.0);
+
+        for i in 1..200 {
+            it.next();
+            if !it.valid() {
+                return Ok(i);
+            }
+        }
+
+        let twentieth_el = it.item().unwrap();
+        let twentieth_key_as_bigint =
+            num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, twentieth_el.0);
+
+        // Maybe better estimation: see how many times you can recursively halve the distance
+        let first_to_last = last_key_as_bigint - first_key_as_bigint.clone();
+        let first_to_twentieth = twentieth_key_as_bigint - first_key_as_bigint;
+        let est_diff = first_to_last / first_to_twentieth;
+        match num_traits::ToPrimitive::to_u64(&est_diff) {
+            None => Ok(usize::MAX),
+            Some(diff) => match (200 * diff).try_into() {
+                Err(_) => Ok(usize::MAX),
+                Ok(diff_usize) => Ok(diff_usize),
+            },
+        }
     }
 
     fn disable_long_read_transaction_safety(&mut self) {}
@@ -151,7 +189,11 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
     type DupCursorMut<T: DupSort> = Cursor<'db, 'db, T>;
 
     fn put<T: Table>(&self, _key: T::Key, _value: T::Value) -> Result<(), DatabaseError> {
-        let key = <T as KeyFormat<T::Key, T::Value>>::format_key(_key, &_value);
+        let key = match T::TABLE.is_dupsort() {
+            false => T::format_key(_key.clone(), &_value),
+            true => extend_composite_key(T::format_key(_key.clone(), &_value)),
+        };
+        // println!("putting {}.{:?}:{:?}", T::NAME, &key, &_value);
         let value = _value.compress();
 
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
@@ -161,7 +203,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
                 info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
                 operation: DatabaseWriteOperation::Put,
                 table_name: T::NAME,
-                key: key.into(),
+                key: _key.encode().into(),
             }
             .into()
         })
@@ -169,22 +211,36 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
     fn delete<T: Table>(
         &self,
-        _key: T::Key,
+        key: T::Key,
         _value: Option<T::Value>,
     ) -> Result<bool, DatabaseError> {
         let locked_opt_tx = self.inner.lock().unwrap();
         let tx = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        let _ = match _value {
-            None => tx.delete_cf(cf_handle, _key.encode().as_ref()),
-            Some(value) => tx.delete_cf(cf_handle, &T::format_key(_key, &value)),
+        let mut it = tx.raw_iterator_cf(cf_handle);
+
+        let key_to_seek = match T::TABLE.is_dupsort() {
+            false => key.encode().as_ref().to_vec(),
+            true => T::format_key(key, &_value.expect("value not set for dupsort delete")),
         };
-        Ok(true)
+
+        it.seek(&key_to_seek);
+
+        match it.item().filter(|el| match T::TABLE.is_dupsort() {
+            true => el.0 == key_to_seek,
+            false => unformat_extended_composite_key(el.0.to_vec()) == key_to_seek,
+        }) {
+            None => Ok(false),
+            Some(el) => {
+                let _ = tx.delete_cf(cf_handle, el.0);
+                Ok(true)
+            }
+        }
     }
 
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
-        /*
+        /* TODO: This is extremely inefficient, workaround for the db not being mutable
         self.db.drop_cf(T::NAME).map_err(|e| {
             DatabaseError::Delete(DatabaseErrorInfo { message: e.to_string(), code: 1 })
         })?;
@@ -193,7 +249,6 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         })
         */
 
-        /* This is extremely inefficient, workaround for the db not being mutable */
         let locked_opt_tx = self.inner.lock().unwrap();
         let tx = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();

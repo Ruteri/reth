@@ -177,6 +177,7 @@ impl DatabaseEnv {
         _args: DatabaseArguments,
     ) -> Result<DatabaseEnv, DatabaseError> {
         let mut opts = rocksdb::Options::default();
+        opts.enable_statistics();
         opts.create_if_missing(true);
         opts.create_missing_column_families(true);
 
@@ -243,16 +244,6 @@ impl DatabaseEnv {
         Ok(())
     }
 }
-
-/*
-impl Deref for DatabaseEnv {
-    type Target = DatabaseEnv; // TODO: rocksdb::Env
-
-    fn deref(&self) -> &Self::Target {
-        &self
-    }
-}
-*/
 
 #[cfg(test)]
 mod tests {
@@ -334,6 +325,8 @@ mod tests {
             .expect(ERROR_PUT);
         tx.put::<AccountChangeSets>(1, AccountBeforeTx { address: address1, info: None })
             .expect(ERROR_PUT);
+        tx.put::<AccountChangeSets>(2, AccountBeforeTx { address: address1, info: None })
+            .expect(ERROR_PUT);
         tx.commit().expect(ERROR_COMMIT);
 
         // GET
@@ -344,10 +337,17 @@ mod tests {
 
         let tx = env.tx().expect(ERROR_INIT_TX);
         let mut cursor = tx.cursor_read::<AccountChangeSets>().unwrap();
-        let mut walker = cursor.walk_range(0..=2).unwrap();
+        let mut walker = cursor.walk_range(0..=1).unwrap();
         assert_eq!(walker.next(), Some(Ok((1, AccountBeforeTx { address: address0, info: None }))));
         assert_eq!(walker.next(), Some(Ok((1, AccountBeforeTx { address: address1, info: None }))));
         assert_eq!(walker.next(), None,);
+
+        let mut cursor = tx.cursor_read::<AccountChangeSets>().unwrap();
+
+        assert_eq!(
+            cursor.seek_exact(2),
+            Ok(Some((2, AccountBeforeTx { address: address1, info: None })))
+        );
     }
 
     #[test]
@@ -675,8 +675,7 @@ mod tests {
         assert_eq!(
             cursor.insert(key_to_insert, B256::ZERO),
             Err(DatabaseWriteError {
-                info: DatabaseErrorInfo { message: "AlreadyExists".into(), code: 1 }, // TODO: this
-                // error is different, confirm it wont break everything
+                info: DatabaseErrorInfo { message: "AlreadyExists".into(), code: 1 },
                 operation: DatabaseWriteOperation::CursorInsert,
                 table_name: CanonicalHeaders::NAME,
                 key: key_to_insert.encode().into(),
@@ -866,13 +865,11 @@ mod tests {
         dup_cursor.upsert(key, entry1).expect(ERROR_UPSERT);
         assert_eq!(dup_cursor.seek_by_key_subkey(key, subkey), Ok(Some(entry1)));
 
-        /* TODO: not supported: non-unique subkeys
         let value = U256::from(2);
         let entry2 = StorageEntry { key: subkey, value };
         dup_cursor.upsert(key, entry2).expect(ERROR_UPSERT);
         assert_eq!(dup_cursor.seek_by_key_subkey(key, subkey), Ok(Some(entry1)));
         assert_eq!(dup_cursor.next_dup_val(), Ok(Some(entry2)));
-        */
     }
 
     #[test]
@@ -1050,9 +1047,7 @@ mod tests {
 
             // NOTE: Both values are present
             assert_eq!(Some(Ok((key1, value00))), walker.next());
-            // assert_eq!(Some(Ok((key1, value01))), walker.next()); // TODO: This is different
-            // from mdbx, but maybe it's not necessary for our usecase. Fixing this in a way that
-            // is performant requires refactoring.
+            assert_eq!(Some(Ok((key1, value01))), walker.next());
             assert_eq!(Some(Ok((key2, value22))), walker.next());
         }
 

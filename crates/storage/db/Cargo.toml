@@ -46,6 +46,9 @@ proptest-derive = { workspace = true, optional = true }
 strum = { workspace = true, features = ["derive"] }
 once_cell.workspace = true
 rocksdb = "0.22.0"
+rand.workspace = true
+num-bigint = "0.4.4"
+num-traits = "0.2.18"
 
 [dev-dependencies]
 # reth libs with arbitrary

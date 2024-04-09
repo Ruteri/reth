@@ -21,6 +21,8 @@ pub mod models;
 mod raw;
 pub use raw::{RawDupSort, RawKey, RawTable, RawValue, TableRawRow};
 
+use rand;
+
 pub(crate) mod utils;
 
 use crate::{
@@ -125,6 +127,25 @@ macro_rules! dedup_table {
             type SubKey = $subkey;
         }
     };
+}
+
+pub fn zero_extend_composite_key(mut ext_key: Vec<u8>) -> Vec<u8> {
+    // ext_key.extend_from_slice(&[0, 0, 0, 0]);
+    ext_key
+}
+
+pub fn extend_composite_key(mut ext_key: Vec<u8>) -> Vec<u8> {
+    /*ext_key.extend_from_slice(&[
+        rand::random::<u8>(),
+        rand::random::<u8>(),
+        rand::random::<u8>(),
+        rand::random::<u8>(),
+    ]);*/
+    ext_key
+}
+
+pub fn unformat_extended_composite_key(ext_key: Vec<u8>) -> Vec<u8> {
+    ext_key //.split_at(ext_key.len() - 4).0.to_vec()
 }
 
 /// Defines all the tables in the database.

@@ -5771,6 +5771,8 @@ dependencies = [
  "iai",
  "metrics",
  "modular-bitfield",
+ "num-bigint",
+ "num-traits",
  "once_cell",
  "page_size",
  "parity-scale-codec",

@@ -8,7 +8,7 @@ use crate::{
     table::{Decode, Decompress, DupSort, Encode, KeyFormat, Table},
     tables::utils::{decode_one, decoder},
     transaction::{DbTx, DbTxMut},
-    DatabaseError,
+    unformat_extended_composite_key, zero_extend_composite_key, DatabaseError,
 };
 
 use core::ops::Bound;
@@ -40,7 +40,6 @@ pub struct Cursor<'itx, 'it, T: Table> {
     >,
     pub tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
     pub state: CursorIt,
-    // TODO: use peekable once it's not unstable
     table_type: std::marker::PhantomData<T>,
 }
 
@@ -244,7 +243,6 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
     }
 
     fn next_dup_val(&mut self) -> ValueOnlyResult<T> {
-        // TODO: this is not correctly implemented for non-unique composite (primary, sub), might break bundle state provider
         Ok(self.next_dup()?.map(|el| el.1.into()))
     }
 
@@ -377,29 +375,26 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
         match self.state {
             CursorIt::Start => Ok(()),
             CursorIt::End => Ok(()),
-            CursorIt::Iterating => {
-                match self.iter.key() {
-                    None => Ok(()),
-                    Some(key) => {
-                        let locked_opt_tx = self.tx.inner.lock().unwrap();
-                        let tx = locked_opt_tx.as_ref().unwrap();
-                        let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
+            CursorIt::Iterating => match self.iter.key() {
+                None => Ok(()),
+                Some(key) => {
+                    let locked_opt_tx = self.tx.inner.lock().unwrap();
+                    let tx = locked_opt_tx.as_ref().unwrap();
+                    let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-                        // TODO: what should happen to self.current?
-                        let _ = tx.delete_cf(cf_handle, &key);
-                        self.iter.seek(key.to_vec().as_slice());
-                        match self.iter.item() {
-                            None => {
-                                self.state = CursorIt::End;
-                            }
-                            Some(_) => {
-                                self.state = CursorIt::Iterating;
-                            }
+                    let _ = tx.delete_cf(cf_handle, &key);
+                    self.iter.seek(key.to_vec().as_slice());
+                    match self.iter.item() {
+                        None => {
+                            self.state = CursorIt::End;
                         }
-                        Ok(())
+                        Some(_) => {
+                            self.state = CursorIt::Iterating;
+                        }
                     }
+                    Ok(())
                 }
-            }
+            },
         }
     }
 }
@@ -412,7 +407,6 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
             CursorIt::Iterating => {
                 let start_ext_key = self.iter.key().unwrap().to_vec();
                 let current_primary = T::unformat_key(start_ext_key.clone());
-                let current_primary_encoded = current_primary.clone().encode();
 
                 let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
@@ -460,25 +454,19 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
 
     fn append_dup(&mut self, _key: <T>::Key, _value: <T>::Value) -> Result<(), DatabaseError> {
         let current = self.iter.item();
-        let mut prev_primary_plus_one: Vec<u8> = _key.clone().encode().as_ref().to_vec();
-        for i in prev_primary_plus_one.len()..1 {
-            if prev_primary_plus_one[i - 1] != u8::max_value() {
-                prev_primary_plus_one[i - 1] = prev_primary_plus_one[i - 1] + 1;
-            }
-        }
 
-        self.iter.seek(prev_primary_plus_one);
-        if let Some(el) = self.iter.item() {
-            if T::unformat_key(el.0.to_vec()) != _key {
-                self.iter.prev();
-            }
-        }
+        let composite_key_to_insert = T::format_key(_key.clone(), &_value);
+        let mut ck_plus_one: Vec<u8> = composite_key_to_insert.clone();
+        //ck_plus_one = zero_extend_composite_key(ck_plus_one);
+        // ck_plus_one.extend_from_slice(&[255, 255, 255, 255]);
 
-        // upsert sets self.state
+        self.iter.seek(&composite_key_to_insert);
         match self.iter.item() {
             None => self.upsert(_key, _value),
             Some(el) => {
-                if el.0 > T::format_key(_key.clone(), &_value).as_slice() {
+                if T::unformat_key(el.0.to_vec()) != _key {
+                    self.upsert(_key, _value)
+                } else {
                     Err(DatabaseWriteError {
                         info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
                         operation: DatabaseWriteOperation::CursorAppendDup,
@@ -486,8 +474,6 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                         key: _key.encode().into(),
                     }
                     .into())
-                } else {
-                    Ok(())
                 }
             }
         }

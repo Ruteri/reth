@@ -1,5 +1,5 @@
 use crate::{
-    extend_composite_key,
+    cursor::DbCursorRW,
     table::{Compress, DupSort, Encode, KeyFormat, Table, TableImporter},
     tables::utils::decode_one,
     transaction::{DbTx, DbTxMut},
@@ -58,6 +58,22 @@ impl<'db> Tx<'db, rocksdb::TransactionDB> {
                 }
             }
         };
+    }
+
+    pub fn put_raw<T: Table>(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), DatabaseError> {
+        // println!("putting {:?}.{:x?} {:x?}", T::NAME, &_key, &_value);
+
+        let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
+
+        self.inner.lock().unwrap().as_mut().unwrap().put_cf(cf_handle, &_key, _value).map_err(|e| {
+            DatabaseWriteError {
+                info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
+                operation: DatabaseWriteOperation::Put,
+                table_name: T::NAME,
+                key: _key.into(),
+            }
+            .into()
+        })
     }
 }
 
@@ -157,7 +173,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let first_key_as_bigint =
             num_bigint::BigInt::from_bytes_be(num_bigint::Sign::Plus, first_el.0);
 
-        for i in 1..200 {
+        for i in 1..1000 {
             it.next();
             if !it.valid() {
                 return Ok(i);
@@ -174,7 +190,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let est_diff = first_to_last / first_to_twentieth;
         match num_traits::ToPrimitive::to_u64(&est_diff) {
             None => Ok(usize::MAX),
-            Some(diff) => match (200 * diff).try_into() {
+            Some(diff) => match (1000 * diff).try_into() {
                 Err(_) => Ok(usize::MAX),
                 Ok(diff_usize) => Ok(diff_usize),
             },
@@ -189,23 +205,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
     type DupCursorMut<T: DupSort> = Cursor<'db, 'db, T>;
 
     fn put<T: Table>(&self, _key: T::Key, _value: T::Value) -> Result<(), DatabaseError> {
-        let key = match T::TABLE.is_dupsort() {
-            false => T::format_key(_key.clone(), &_value),
-            true => extend_composite_key(T::format_key(_key.clone(), &_value)),
-        };
-        let value = _value.compress();
-
-        let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
-
-        self.inner.lock().unwrap().as_mut().unwrap().put_cf(cf_handle, &key, value).map_err(|e| {
-            DatabaseWriteError {
-                info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
-                operation: DatabaseWriteOperation::Put,
-                table_name: T::NAME,
-                key: _key.encode().into(),
-            }
-            .into()
-        })
+        self.cursor_write::<T>()?.upsert(_key, _value)
     }
 
     fn delete<T: Table>(
@@ -228,7 +228,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
         match it.item().filter(|el| match T::TABLE.is_dupsort() {
             true => el.0 == key_to_seek,
-            false => unformat_extended_composite_key(el.0.to_vec()) == key_to_seek,
+            false => unformat_extended_composite_key::<T>(el.0.to_vec()) == key_to_seek,
         }) {
             None => Ok(false),
             Some(el) => {
@@ -255,7 +255,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         it.seek_to_first();
         while let Some(key) = it.key() {
             let _ = tx.delete_cf(cf_handle, key);
-            it.next();
+            it.seek_to_first();
         }
         Ok(())
     }

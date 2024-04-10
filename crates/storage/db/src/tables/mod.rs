@@ -21,8 +21,6 @@ pub mod models;
 mod raw;
 pub use raw::{RawDupSort, RawKey, RawTable, RawValue, TableRawRow};
 
-use rand;
-
 pub(crate) mod utils;
 
 use crate::{
@@ -129,23 +127,38 @@ macro_rules! dedup_table {
     };
 }
 
-pub fn zero_extend_composite_key(mut ext_key: Vec<u8>) -> Vec<u8> {
-    // ext_key.extend_from_slice(&[0, 0, 0, 0]);
+pub fn max_extend_composite_key<T: Table>(mut ext_key: Vec<u8>) -> Vec<u8> {
+    if T::TABLE.is_dupsort() {
+        ext_key.extend_from_slice(&[0xff, 0xff, 0xff, 0xff]);
+    }
+    ext_key
+}
+pub fn zero_extend_composite_key<T: Table>(mut ext_key: Vec<u8>) -> Vec<u8> {
+    if T::TABLE.is_dupsort() {
+        ext_key.extend_from_slice(&[0, 0, 0, 0]);
+    }
     ext_key
 }
 
-pub fn extend_composite_key(mut ext_key: Vec<u8>) -> Vec<u8> {
-    /*ext_key.extend_from_slice(&[
-        rand::random::<u8>(),
-        rand::random::<u8>(),
-        rand::random::<u8>(),
-        rand::random::<u8>(),
-    ]);*/
+pub fn up_extend_composite_key<T: Table>(mut ext_key: Vec<u8>) -> Vec<u8> {
+    if T::TABLE.is_dupsort() {
+        for i in (ext_key.len() - 4..ext_key.len()).rev() {
+            if ext_key[i] != u8::max_value() {
+                ext_key[i] = ext_key[i] + 1;
+                return ext_key;
+            } else {
+                ext_key[i] = 0;
+            }
+        }
+    }
     ext_key
 }
 
-pub fn unformat_extended_composite_key(ext_key: Vec<u8>) -> Vec<u8> {
-    ext_key //.split_at(ext_key.len() - 4).0.to_vec()
+pub fn unformat_extended_composite_key<T: Table>(ext_key: Vec<u8>) -> Vec<u8> {
+    if T::TABLE.is_dupsort() {
+        return ext_key.split_at(ext_key.len() - 4).0.to_vec();
+    }
+    ext_key
 }
 
 /// Defines all the tables in the database.

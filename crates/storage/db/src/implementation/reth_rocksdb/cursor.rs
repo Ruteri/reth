@@ -4,11 +4,12 @@ use crate::{
         self, DbCursorRO, DbCursorRW, DbDupCursorRO, DbDupCursorRW, DupWalker, RangeWalker,
         ReverseWalker, Walker,
     },
-    reth_rocksdb,
-    table::{Decode, Decompress, DupSort, Encode, KeyFormat, Table},
+    max_extend_composite_key, reth_rocksdb,
+    table::{Compress, Decode, Decompress, DupSort, Encode, KeyFormat, Table},
     tables::utils::{decode_one, decoder},
     transaction::{DbTx, DbTxMut},
-    unformat_extended_composite_key, zero_extend_composite_key, DatabaseError,
+    unformat_extended_composite_key, up_extend_composite_key, zero_extend_composite_key,
+    DatabaseError,
 };
 
 use core::ops::Bound;
@@ -221,9 +222,12 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
 
                 let mut prev_primary_plus_one: Vec<u8> =
                     T::unformat_key(prev_item.unwrap().0.to_vec()).encode().into();
-                for i in prev_primary_plus_one.len()..1 {
-                    if prev_primary_plus_one[i - 1] != u8::max_value() {
-                        prev_primary_plus_one[i - 1] = prev_primary_plus_one[i - 1] + 1;
+                for i in (1..prev_primary_plus_one.len()).rev() {
+                    if prev_primary_plus_one[i] != u8::max_value() {
+                        prev_primary_plus_one[i] = prev_primary_plus_one[i] + 1;
+                        break;
+                    } else {
+                        prev_primary_plus_one[i] = 0;
                     }
                 }
 
@@ -251,8 +255,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         _key: <T as Table>::Key,
         _subkey: <T as DupSort>::SubKey,
     ) -> ValueOnlyResult<T> {
-        let ext_key = T::format_composite_key(_key.clone(), _subkey.clone());
-        self.iter.seek(&ext_key);
+        self.iter.seek(T::format_composite_key(_key.clone(), _subkey.clone()));
 
         match self.iter.item() {
             None => {
@@ -282,7 +285,10 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             }
             (Some(key), None) => self.seek(key),
             (Some(key), Some(subkey)) => {
-                let ext_key = T::format_composite_key(key.clone(), subkey.clone().into());
+                let ext_key = zero_extend_composite_key::<T>(T::format_composite_key(
+                    key.clone(),
+                    subkey.clone().into(),
+                ));
                 self.iter.seek(&ext_key);
                 match self.iter.item() {
                     None => {
@@ -307,18 +313,60 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
         _value: <T as Table>::Value,
     ) -> Result<(), DatabaseError> {
         // in rocksdb its always an upsert
-        let ext_key = <T as KeyFormat<T::Key, T::Value>>::format_key(_key.clone(), &_value);
-        self.tx.put::<T>(_key, _value)?;
-        self.iter.seek(&ext_key);
+        let composite_key = T::format_key(_key.clone(), &_value);
+        self.iter.seek_for_prev(max_extend_composite_key::<T>(composite_key.clone()));
+
         match self.iter.item() {
             None => {
-                panic!("could not find item we just put");
-                self.state = CursorIt::End;
+                let zero_ext_key = zero_extend_composite_key::<T>(composite_key.clone());
+                self.tx.put_raw::<T>(zero_ext_key.clone(), _value.compress().into())?;
+                self.iter.seek(&zero_ext_key);
+                self.state = CursorIt::Iterating;
             }
             Some(el) => {
                 self.state = CursorIt::Iterating;
+                if unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key {
+                    if !T::TABLE.is_dupsort() {
+                        let upped_ext_key = up_extend_composite_key::<T>(el.0.to_vec());
+                        self.tx.put_raw::<T>(upped_ext_key.clone(), _value.compress().into())?;
+                        self.iter.seek(&upped_ext_key);
+                        self.state = CursorIt::Iterating;
+                    } else {
+                        // TODO: this is supremely inefficient.
+                        // Might be faster to put the value in the key.
+                        let mut all_dup_values: Vec<Vec<u8>> = Vec::new();
+                        all_dup_values.push(_value.compress().into());
+                        self.iter.seek(&composite_key);
+                        self.state = CursorIt::Iterating;
+                        while let Some(el) = self
+                            .current()?
+                            .filter(|el| T::format_key(el.0.clone(), &el.1) == composite_key)
+                        {
+                            all_dup_values.push(el.1.compress().into());
+                            self.iter.next();
+                        }
+                        all_dup_values.sort();
+                        let mut c_i: u32 = 0;
+                        for el_v in all_dup_values {
+                            let mut new_extended_key = composite_key.clone();
+                            new_extended_key.extend_from_slice(&c_i.to_be_bytes());
+                            self.tx.put_raw::<T>(new_extended_key, el_v)?;
+                            c_i += 1;
+                        }
+
+                        self.iter.seek_for_prev(max_extend_composite_key::<T>(composite_key)); // We should probably set it to the one
+                                                                                               // just written
+                        self.state = CursorIt::Iterating;
+                    }
+                } else {
+                    let zero_ext_key = zero_extend_composite_key::<T>(composite_key.clone());
+                    self.tx.put_raw::<T>(zero_ext_key.clone(), _value.compress().into())?;
+                    self.iter.seek(&zero_ext_key);
+                    self.state = CursorIt::Iterating;
+                }
             }
         }
+
         Ok(())
     }
 
@@ -456,11 +504,9 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
         let current = self.iter.item();
 
         let composite_key_to_insert = T::format_key(_key.clone(), &_value);
-        let mut ck_plus_one: Vec<u8> = composite_key_to_insert.clone();
-        //ck_plus_one = zero_extend_composite_key(ck_plus_one);
-        // ck_plus_one.extend_from_slice(&[255, 255, 255, 255]);
+        let ck_plus_one: Vec<u8> = max_extend_composite_key::<T>(composite_key_to_insert.clone());
 
-        self.iter.seek(&composite_key_to_insert);
+        self.iter.seek(&ck_plus_one);
         match self.iter.item() {
             None => self.upsert(_key, _value),
             Some(el) => {
@@ -489,7 +535,7 @@ where
     match res {
         None => Ok(None),
         Some(el) => {
-            let key = <T as KeyFormat<T::Key, T::Value>>::unformat_key(el.0.to_vec());
+            let key = T::unformat_key(el.0.to_vec());
             let value = decode_one::<T>(Cow::Owned(el.1.to_vec())).map_err(|e| {
                 DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 })
             })?;

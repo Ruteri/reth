@@ -229,7 +229,9 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR>
 impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
-        self.cursor.delete_current()
+        let r = self.cursor.delete_current();
+        let _ = self.cursor.next();
+        r
     }
 }
 

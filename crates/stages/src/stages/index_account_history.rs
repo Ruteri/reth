@@ -270,6 +270,9 @@ mod tests {
         })
         .unwrap();
 
+        let table = cast(db.table::<tables::AccountsHistory>().unwrap());
+        assert_eq!(table, BTreeMap::from([(shard(u64::MAX), full_list.clone())]));
+
         // run
         run(&db, LAST_BLOCK_IN_FULL_SHARD + 2, Some(LAST_BLOCK_IN_FULL_SHARD));
 

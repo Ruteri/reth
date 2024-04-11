@@ -227,8 +227,8 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         it.seek(&key_to_seek);
 
         match it.item().filter(|el| match T::TABLE.is_dupsort() {
-            true => el.0 == key_to_seek,
-            false => unformat_extended_composite_key::<T>(el.0.to_vec()) == key_to_seek,
+            false => el.0 == key_to_seek,
+            true => unformat_extended_composite_key::<T>(el.0.to_vec()) == key_to_seek,
         }) {
             None => Ok(false),
             Some(el) => {

@@ -1059,8 +1059,6 @@ mod tests {
             let mut cursor = tx.cursor_dup_read::<PlainStorageState>().unwrap();
 
             // NOTE: There are two values with same SubKey but only first one is shown
-            // MM TODO: This is just wrong now isn't it? Why do we care about the order if its not
-            // guaranteed anyway?
             assert_eq!(Ok(Some(value00)), cursor.seek_by_key_subkey(key1, value00.key));
             // key1 but value is greater than the one in the DB
             assert_eq!(Ok(None), cursor.seek_by_key_subkey(key1, value22.key));

@@ -255,7 +255,10 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         _key: <T as Table>::Key,
         _subkey: <T as DupSort>::SubKey,
     ) -> ValueOnlyResult<T> {
-        self.iter.seek(T::format_composite_key(_key.clone(), _subkey.clone()));
+        self.iter.seek(zero_extend_composite_key::<T>(T::format_composite_key(
+            _key.clone(),
+            _subkey.clone(),
+        )));
 
         match self.iter.item() {
             None => {
@@ -265,6 +268,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             Some(el) => {
                 self.state = CursorIt::Iterating;
                 if T::unformat_key(el.0.to_vec()) == _key {
+                    // TODO: why does this not include the subkey?
                     decode_value::<T>(el.1)
                 } else {
                     Ok(None)
@@ -279,30 +283,20 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         _subkey: Option<<T as DupSort>::SubKey>,
     ) -> Result<DupWalker<'_, T, Self>, DatabaseError> {
         let start_el = match (_key, _subkey) {
-            (None, None) => self.first(),
+            (None, None) => self.first().transpose(),
             (None, Some(subkey)) => {
                 panic!("not implemented");
             }
-            (Some(key), None) => self.seek(key),
+            (Some(key), None) => self.seek_exact(key).transpose(),
             (Some(key), Some(subkey)) => {
-                let ext_key = zero_extend_composite_key::<T>(T::format_composite_key(
-                    key.clone(),
-                    subkey.clone().into(),
-                ));
-                self.iter.seek(&ext_key);
-                match self.iter.item() {
-                    None => {
-                        self.state = CursorIt::End;
-                        Ok(None)
-                    }
-                    Some(el) => {
-                        self.state = CursorIt::Iterating;
-                        decode_item::<T>(Some(el))
-                    }
-                }
+                let _ = self.seek_by_key_subkey(key.clone(), subkey.clone());
+                self.current().transpose()
+                // TODO: why does this not include the subkey? We could start walking from the
+                // next subkey if current does not exist
+                //Ok(self.current()?.filter(|el| { T::format_key(el.0.clone(), &el.1) == T::format_composite_key(key.clone(), subkey.clone()) })) .transpose()
             }
         };
-        Ok(DupWalker { cursor: self, start: start_el.transpose() })
+        Ok(DupWalker { cursor: self, start: start_el })
     }
 }
 
@@ -316,53 +310,51 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
         let composite_key = T::format_key(_key.clone(), &_value);
         self.iter.seek_for_prev(max_extend_composite_key::<T>(composite_key.clone()));
 
-        match self.iter.item() {
-            None => {
+        self.state = CursorIt::Iterating;
+
+        match (T::TABLE.is_dupsort(), self.iter.item()) {
+            (_, None) => {
                 let zero_ext_key = zero_extend_composite_key::<T>(composite_key.clone());
                 self.tx.put_raw::<T>(zero_ext_key.clone(), _value.compress().into())?;
                 self.iter.seek(&zero_ext_key);
-                self.state = CursorIt::Iterating;
             }
-            Some(el) => {
-                self.state = CursorIt::Iterating;
-                if unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key {
-                    if !T::TABLE.is_dupsort() {
-                        let upped_ext_key = up_extend_composite_key::<T>(el.0.to_vec());
-                        self.tx.put_raw::<T>(upped_ext_key.clone(), _value.compress().into())?;
-                        self.iter.seek(&upped_ext_key);
-                        self.state = CursorIt::Iterating;
-                    } else {
-                        // TODO: this is supremely inefficient.
-                        // Might be faster to put the value in the key.
-                        let mut all_dup_values: Vec<Vec<u8>> = Vec::new();
-                        all_dup_values.push(_value.compress().into());
-                        self.iter.seek(&composite_key);
-                        self.state = CursorIt::Iterating;
-                        while let Some(el) = self
-                            .current()?
-                            .filter(|el| T::format_key(el.0.clone(), &el.1) == composite_key)
-                        {
-                            all_dup_values.push(el.1.compress().into());
-                            self.iter.next();
-                        }
-                        all_dup_values.sort();
-                        let mut c_i: u32 = 0;
-                        for el_v in all_dup_values {
-                            let mut new_extended_key = composite_key.clone();
-                            new_extended_key.extend_from_slice(&c_i.to_be_bytes());
-                            self.tx.put_raw::<T>(new_extended_key, el_v)?;
-                            c_i += 1;
-                        }
-
-                        self.iter.seek_for_prev(max_extend_composite_key::<T>(composite_key)); // We should probably set it to the one
-                                                                                               // just written
-                        self.state = CursorIt::Iterating;
-                    }
-                } else {
+            (false, Some(el)) => {
+                self.tx.put_raw::<T>(composite_key.clone(), _value.compress().into())?;
+                self.iter.seek(&composite_key);
+            }
+            (true, Some(el)) => {
+                if unformat_extended_composite_key::<T>(el.0.to_vec()) != composite_key {
                     let zero_ext_key = zero_extend_composite_key::<T>(composite_key.clone());
                     self.tx.put_raw::<T>(zero_ext_key.clone(), _value.compress().into())?;
                     self.iter.seek(&zero_ext_key);
-                    self.state = CursorIt::Iterating;
+                } else {
+                    // TODO: this is supremely inefficient. O(n) insertions.
+                    // We can do O(1) amortized by keeping the indices sparse - we are
+                    // inserting into a sorted vector
+
+                    let value_to_insert = _value.compress().into();
+                    while let Some(el) = self.iter.item().filter(|el| {
+                        unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key
+                    }) {
+                        let c_el_v = el.1.into();
+                        if c_el_v < value_to_insert {
+                            let inserted_key = up_extend_composite_key::<T>(el.0.to_vec());
+                            self.tx.put_raw::<T>(inserted_key.clone(), value_to_insert)?;
+                            self.iter.seek(inserted_key);
+                            return Ok(());
+                        } else {
+                            self.tx.put_raw::<T>(
+                                up_extend_composite_key::<T>(el.0.to_vec()),
+                                c_el_v,
+                            )?;
+                            self.iter.prev();
+                        }
+                    }
+
+                    // Lowest value - put at the front
+                    let inserted_key = zero_extend_composite_key::<T>(composite_key.clone());
+                    self.tx.put_raw::<T>(inserted_key.clone(), value_to_insert)?;
+                    self.iter.seek(inserted_key);
                 }
             }
         }
@@ -420,6 +412,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
     }
 
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
+        // TODO: should delete_current delete all duplicates as well?
         match self.state {
             CursorIt::Start => Ok(()),
             CursorIt::End => Ok(()),
@@ -431,10 +424,10 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
                     let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
                     let _ = tx.delete_cf(cf_handle, &key);
-                    self.iter.seek_for_prev(key.to_vec().as_slice());
+                    self.iter.seek(key.to_vec().as_slice());
                     match self.iter.item() {
                         None => {
-                            self.state = CursorIt::Start;
+                            self.state = CursorIt::End;
                         }
                         Some(_) => {
                             self.state = CursorIt::Iterating;
@@ -455,30 +448,18 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
             CursorIt::Iterating => {
                 let start_ext_key = self.iter.key().unwrap().to_vec();
                 let current_primary = T::unformat_key(start_ext_key.clone());
+                self.iter.seek(current_primary.clone().encode().as_ref());
 
                 let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
                 let mut to_delete: Vec<Vec<u8>> = Vec::new();
-                // Schedule deleting preceeding
-                self.iter.prev();
-                while let Some(key) = self.iter.key() {
-                    let key_as_vec = key.to_vec();
-                    if T::unformat_key(key_as_vec.clone()) != current_primary {
-                        break;
-                    }
-                    to_delete.push(key_as_vec);
-                    self.iter.prev();
-                }
-
-                // Schedule deleting current and subsequent
-                let _ = self.iter.seek(&start_ext_key);
-                while let Some(key) = self.iter.key() {
-                    let key_as_vec = key.to_vec();
-                    if T::unformat_key(key_as_vec.clone()) != current_primary {
-                        break;
-                    }
-
-                    to_delete.push(key_as_vec);
+                while let Some(key) = self
+                    .iter
+                    .key()
+                    .map(|k| k.to_vec())
+                    .filter(|k| T::unformat_key(k.to_owned()) == current_primary)
+                {
+                    to_delete.push(key.to_owned());
                     self.iter.next();
                 }
 
@@ -488,11 +469,11 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                     let _ = tx.delete_cf(cf_handle, key);
                 }
 
-                let _ = self.iter.seek_for_prev(&start_ext_key);
+                let _ = self.iter.seek(current_primary.encode().as_ref());
                 if self.iter.valid() {
                     self.state = CursorIt::Iterating;
                 } else {
-                    self.state = CursorIt::Start;
+                    self.state = CursorIt::End;
                 }
 
                 return Ok(());

@@ -61,7 +61,7 @@ impl<'db> Tx<'db, rocksdb::TransactionDB> {
     }
 
     pub fn put_raw<T: Table>(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), DatabaseError> {
-        // println!("putting {:?}.{:x?} {:x?}", T::NAME, &_key, &_value);
+        // println!("putting {:?}.{:02x?} {:02x?}", T::NAME, &_key, &_value);
 
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
@@ -213,28 +213,43 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         key: T::Key,
         _value: Option<T::Value>,
     ) -> Result<bool, DatabaseError> {
+        // println!("deleting {:?}.{:?} {:02x?}", T::NAME, &key, &_value);
         let locked_opt_tx = self.inner.lock().unwrap();
         let tx = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
         let mut it = tx.raw_iterator_cf(cf_handle);
 
-        let key_to_seek = match T::TABLE.is_dupsort() {
-            false => key.encode().as_ref().to_vec(),
-            true => T::format_key(key, &_value.expect("value not set for dupsort delete")),
-        };
+        if !T::TABLE.is_dupsort() {
+            let key_to_seek = key.encode().as_ref().to_vec();
 
-        it.seek(&key_to_seek);
+            it.seek(&key_to_seek);
 
-        match it.item().filter(|el| match T::TABLE.is_dupsort() {
-            false => el.0 == key_to_seek,
-            true => unformat_extended_composite_key::<T>(el.0.to_vec()) == key_to_seek,
-        }) {
-            None => Ok(false),
-            Some(el) => {
-                let _ = tx.delete_cf(cf_handle, el.0);
-                Ok(true)
+            match it.item().filter(|el| el.0 == key_to_seek) {
+                None => Ok(false),
+                Some(el) => {
+                    let _ = tx.delete_cf(cf_handle, el.0);
+                    Ok(true)
+                }
             }
+        } else {
+            let composite_key =
+                T::format_key(key, &_value.expect("value not set for dupsort delete"));
+            it.seek(&composite_key);
+
+            let found = it
+                .item()
+                .filter(|el| unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key)
+                .is_some();
+
+            while let Some(el) = it
+                .item()
+                .filter(|el| unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key)
+            {
+                let _ = tx.delete_cf(cf_handle, el.0);
+                it.seek(&composite_key);
+            }
+            Ok(found)
         }
     }
 

@@ -118,7 +118,7 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
 
     fn prev(&mut self) -> PairResult<T> {
         match self.state {
-            CursorIt::Start => self.last(),
+            CursorIt::Start => Ok(None), // self.last(),
             CursorIt::End => self.last(),
             CursorIt::Iterating => {
                 self.iter.prev();
@@ -482,8 +482,6 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
     }
 
     fn append_dup(&mut self, _key: <T>::Key, _value: <T>::Value) -> Result<(), DatabaseError> {
-        let current = self.iter.item();
-
         let composite_key_to_insert = T::format_key(_key.clone(), &_value);
         let ck_plus_one: Vec<u8> = max_extend_composite_key::<T>(composite_key_to_insert.clone());
 

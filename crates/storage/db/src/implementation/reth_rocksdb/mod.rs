@@ -250,7 +250,7 @@ mod tests {
     use super::*;
     use crate::{
         abstraction::table::{Encode, Table},
-        cursor::{DbDupCursorRO, DbDupCursorRW, ReverseWalker, Walker},
+        cursor::{DbDupCursorRO, DbDupCursorRW, DupWalker, ReverseWalker, Walker},
         models::{AccountBeforeTx, ShardedKey},
         tables::{
             AccountsHistory, CanonicalHeaders, Headers, PlainAccountState, PlainStorageState,
@@ -348,6 +348,811 @@ mod tests {
             cursor.seek_exact(2),
             Ok(Some((2, AccountBeforeTx { address: address1, info: None })))
         );
+    }
+
+    #[test]
+    fn db_dup_cursor_upsert() {
+        let db: Arc<DatabaseEnv> = create_test_db(DatabaseEnvKind::RW);
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+
+        let key = |k: u8| Address::with_last_byte(k);
+        let subkey = |sk: u8| B256::with_last_byte(sk);
+        let entry = |k: u8, sk: u8, v_add: u8| StorageEntry {
+            key: subkey(sk),
+            value: U256::from((k as u64) * 16 * 16 + (sk as u64) * 16 + (v_add as u64)),
+        };
+        let pair = |k: u8, sk: u8, v_add: u8| (key(k), entry(k, sk, v_add));
+
+        let mut dup_cursor = tx.cursor_dup_write::<PlainStorageState>().unwrap();
+
+        // unique keys
+        dup_cursor.upsert(key(2), entry(2, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1)])
+        );
+
+        dup_cursor.upsert(key(1), entry(1, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 2, 1), pair(2, 2, 1)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk_back(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(1, 2, 1)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        dup_cursor.upsert(key(3), entry(3, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+
+        // upsering unique composite keys
+        dup_cursor.upsert(key(2), entry(2, 1, 1)).expect(ERROR_UPSERT); // middle-front
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 1, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(1, 2, 1))));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 2, 1), pair(2, 1, 1), pair(2, 2, 1), pair(3, 2, 1)])
+        );
+
+        dup_cursor.upsert(key(1), entry(1, 1, 1)).expect(ERROR_UPSERT); // front-front
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 2, 1))));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 1, 1), pair(1, 2, 1), pair(2, 1, 1), pair(2, 2, 1), pair(3, 2, 1)])
+        );
+
+        dup_cursor.upsert(key(3), entry(3, 3, 1)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(1, 1, 1),
+                pair(1, 2, 1),
+                pair(2, 1, 1),
+                pair(2, 2, 1),
+                pair(3, 2, 1),
+                pair(3, 3, 1)
+            ])
+        );
+
+        // duplicate composite keys
+        dup_cursor.upsert(key(2), entry(2, 2, 3)).expect(ERROR_UPSERT); // middle-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 3))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 3))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 1))));
+
+        dup_cursor.upsert(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-middle
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 2))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 3))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 2))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 1))));
+
+        dup_cursor.upsert(key(1), entry(1, 1, 0)).expect(ERROR_UPSERT); // front-front
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 1))));
+
+        dup_cursor.upsert(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 2))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 2))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 1))));
+
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(1, 1, 0),
+                pair(1, 1, 1),
+                pair(1, 2, 1),
+                pair(2, 1, 1),
+                pair(2, 2, 1),
+                pair(2, 2, 2),
+                pair(2, 2, 3),
+                pair(3, 2, 1),
+                pair(3, 3, 1),
+                pair(3, 3, 2)
+            ])
+        );
+
+        // duplicate composite keys and values
+        dup_cursor.upsert(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 2))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 2))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 3))));
+        dup_cursor.upsert(key(1), entry(1, 1, 0)).expect(ERROR_UPSERT); // front-front
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 0))));
+        dup_cursor.upsert(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 2))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(3, 3, 2))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(1, 1, 0),
+                pair(1, 1, 0),
+                pair(1, 1, 1),
+                pair(1, 2, 1),
+                pair(2, 1, 1),
+                pair(2, 2, 1),
+                pair(2, 2, 2),
+                pair(2, 2, 2),
+                pair(2, 2, 3),
+                pair(3, 2, 1),
+                pair(3, 3, 1),
+                pair(3, 3, 2),
+                pair(3, 3, 2)
+            ])
+        );
+
+        assert_eq!(
+            dup_cursor.walk_back(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(3, 3, 2),
+                pair(3, 3, 2),
+                pair(3, 3, 1),
+                pair(3, 2, 1),
+                pair(2, 2, 3),
+                pair(2, 2, 2),
+                pair(2, 2, 2),
+                pair(2, 2, 1),
+                pair(2, 1, 1),
+                pair(1, 2, 1),
+                pair(1, 1, 1),
+                pair(1, 1, 0),
+                pair(1, 1, 0)
+            ])
+        );
+    }
+
+    #[test]
+    fn db_dup_cursor_append() {
+        let db: Arc<DatabaseEnv> = create_test_db(DatabaseEnvKind::RW);
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+
+        let key = |k: u8| Address::with_last_byte(k);
+        let subkey = |sk: u8| B256::with_last_byte(sk);
+        let entry = |k: u8, sk: u8, v_add: u8| StorageEntry {
+            key: subkey(sk),
+            value: U256::from((k as u64) * 16 * 16 + (sk as u64) * 16 + (v_add as u64)),
+        };
+        let pair = |k: u8, sk: u8, v_add: u8| (key(k), entry(k, sk, v_add));
+
+        let mut dup_cursor = tx.cursor_dup_write::<PlainStorageState>().unwrap();
+
+        // unique keys
+        dup_cursor.append(key(2), entry(2, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1)])
+        );
+
+        assert!(dup_cursor.append(key(1), entry(1, 2, 1)).is_err());
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1)])
+        );
+
+        dup_cursor.append(key(3), entry(3, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(3, 2, 1)])
+        );
+
+        // upsering unique composite keys
+        assert!(dup_cursor.append(key(2), entry(2, 1, 1)).is_err()); // middle-front
+        assert!(dup_cursor.append(key(1), entry(1, 1, 1)).is_err()); // front-front
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(3, 2, 1)])
+        );
+
+        dup_cursor.append(key(3), entry(3, 3, 1)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(3, 2, 1), pair(3, 3, 1)])
+        );
+
+        assert!(dup_cursor.append(key(2), entry(2, 2, 3)).is_err()); // middle-back
+        assert!(dup_cursor.append(key(2), entry(2, 2, 2)).is_err()); // middle-middle
+        assert!(dup_cursor.append(key(1), entry(1, 1, 0)).is_err()); // front-front
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(3, 2, 1), pair(3, 3, 1)])
+        );
+
+        dup_cursor.append(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 2))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(3, 2, 1), pair(3, 3, 1), pair(3, 3, 2)])
+        );
+
+        // duplicate composite keys and values
+        assert!(dup_cursor.append(key(2), entry(2, 2, 2)).is_err()); // middle-back
+        assert!(dup_cursor.append(key(2), entry(1, 1, 0)).is_err()); // front-front
+        assert!(dup_cursor.append(key(2), entry(3, 3, 2)).is_err()); // back-back (duplicate value)
+
+        assert_eq!(
+            dup_cursor.walk_back(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(3, 3, 2), pair(3, 3, 1), pair(3, 2, 1), pair(2, 2, 1)])
+        );
+    }
+
+    #[test]
+    fn db_dup_cursor_append_dup() {
+        let db: Arc<DatabaseEnv> = create_test_db(DatabaseEnvKind::RW);
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+
+        let key = |k: u8| Address::with_last_byte(k);
+        let subkey = |sk: u8| B256::with_last_byte(sk);
+        let entry = |k: u8, sk: u8, v_add: u8| StorageEntry {
+            key: subkey(sk),
+            value: U256::from((k as u64) * 16 * 16 + (sk as u64) * 16 + (v_add as u64)),
+        };
+        let pair = |k: u8, sk: u8, v_add: u8| (key(k), entry(k, sk, v_add));
+
+        let mut dup_cursor = tx.cursor_dup_write::<PlainStorageState>().unwrap();
+
+        // unique keys
+        dup_cursor.append_dup(key(2), entry(2, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1)])
+        );
+
+        dup_cursor.append_dup(key(1), entry(1, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 2, 1), pair(2, 2, 1)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk_back(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 2, 1), pair(1, 2, 1)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        dup_cursor.append_dup(key(3), entry(3, 2, 1)).expect(ERROR_UPSERT);
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+
+        // upsering unique composite keys
+        assert!(dup_cursor.append_dup(key(2), entry(2, 1, 1)).is_err()); // middle-front
+        assert_eq!(dup_cursor.current(), Ok(None)); // Weird
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 2, 1), pair(2, 2, 1), pair(3, 2, 1)])
+        );
+
+        assert!(dup_cursor.append_dup(key(1), entry(1, 1, 1)).is_err()); // front-front
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 2, 1), pair(2, 2, 1), pair(3, 2, 1)])
+        );
+
+        dup_cursor.append_dup(key(3), entry(3, 3, 1)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 2, 1), pair(2, 2, 1), pair(3, 2, 1), pair(3, 3, 1)])
+        );
+
+        // duplicate composite keys
+        dup_cursor.append_dup(key(2), entry(2, 2, 3)).expect(ERROR_UPSERT); // middle-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 3))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(3, 2, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 3))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 1))));
+
+        // TODO: probably broken
+        dup_cursor.append_dup(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-middle
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 2))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 3))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 2))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(2, 2, 1))));
+
+        assert!(dup_cursor.append_dup(key(1), entry(1, 1, 0)).is_err()); // front-front
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 2, 1))));
+
+        dup_cursor.append_dup(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 2))));
+
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(1, 2, 1),
+                pair(2, 2, 1),
+                pair(2, 2, 2),
+                pair(2, 2, 3),
+                pair(3, 2, 1),
+                pair(3, 3, 1),
+                pair(3, 3, 2)
+            ])
+        );
+
+        // duplicate composite keys and values
+        dup_cursor.append_dup(key(2), entry(2, 2, 1)).expect(ERROR_UPSERT); // middle-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        dup_cursor.append_dup(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 2))));
+        dup_cursor.append_dup(key(2), entry(2, 2, 3)).expect(ERROR_UPSERT); // middle-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 3))));
+        assert!(dup_cursor.append_dup(key(1), entry(1, 1, 0)).is_err()); // front-front
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 2, 1))));
+        dup_cursor.append_dup(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 3, 2))));
+
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(1, 2, 1),
+                pair(2, 2, 1),
+                pair(2, 2, 1),
+                pair(2, 2, 2),
+                pair(2, 2, 2),
+                pair(2, 2, 3),
+                pair(2, 2, 3),
+                pair(3, 2, 1),
+                pair(3, 3, 1),
+                pair(3, 3, 2),
+                pair(3, 3, 2)
+            ])
+        );
+    }
+
+    #[test]
+    fn db_dup_cursor_seeks_and_walks() {
+        let db: Arc<DatabaseEnv> = create_test_db(DatabaseEnvKind::RW);
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+
+        let key = |k: u8| Address::with_last_byte(k);
+        let subkey = |sk: u8| B256::with_last_byte(sk);
+        let entry = |k: u8, sk: u8, v_add: u8| StorageEntry {
+            key: subkey(sk),
+            value: U256::from((k as u64) * 16 * 16 + (sk as u64) * 16 + (v_add as u64)),
+        };
+        let pair = |k: u8, sk: u8, v_add: u8| (key(k), entry(k, sk, v_add));
+
+        let mut dup_cursor = tx.cursor_dup_write::<PlainStorageState>().unwrap();
+
+        dup_cursor.upsert(key(2), entry(2, 2, 1)).expect(ERROR_UPSERT);
+        dup_cursor.upsert(key(1), entry(1, 2, 1)).expect(ERROR_UPSERT);
+        dup_cursor.upsert(key(3), entry(3, 2, 1)).expect(ERROR_UPSERT);
+        dup_cursor.upsert(key(2), entry(2, 1, 1)).expect(ERROR_UPSERT); // middle-front
+        dup_cursor.upsert(key(1), entry(1, 1, 1)).expect(ERROR_UPSERT); // front-front
+        dup_cursor.upsert(key(3), entry(3, 3, 1)).expect(ERROR_UPSERT); // back-back
+        dup_cursor.upsert(key(2), entry(2, 2, 3)).expect(ERROR_UPSERT); // middle-back
+        dup_cursor.upsert(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-middle
+        dup_cursor.upsert(key(1), entry(1, 1, 0)).expect(ERROR_UPSERT); // front-front
+        dup_cursor.upsert(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        dup_cursor.upsert(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-back
+        dup_cursor.upsert(key(1), entry(1, 1, 0)).expect(ERROR_UPSERT); // front-front
+        dup_cursor.upsert(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+        dup_cursor.upsert(key(5), entry(5, 1, 1)).expect(ERROR_UPSERT); // back-back
+        dup_cursor.upsert(key(5), entry(5, 1, 2)).expect(ERROR_UPSERT); // back-back
+
+        assert_eq!(
+            dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                pair(1, 1, 0),
+                pair(1, 1, 0),
+                pair(1, 1, 1),
+                pair(1, 2, 1),
+                pair(2, 1, 1),
+                pair(2, 2, 1),
+                pair(2, 2, 2),
+                pair(2, 2, 2),
+                pair(2, 2, 3),
+                pair(3, 2, 1),
+                pair(3, 3, 1),
+                pair(3, 3, 2),
+                pair(3, 3, 2),
+                pair(5, 1, 1),
+                pair(5, 1, 2)
+            ])
+        );
+
+        // first
+        assert_eq!(dup_cursor.first(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(1, 1, 1))));
+
+        assert_eq!(dup_cursor.first(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        // last
+        assert_eq!(dup_cursor.last(), Ok(Some(pair(5, 1, 2))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 2))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(3, 3, 2))));
+
+        assert_eq!(dup_cursor.last(), Ok(Some(pair(5, 1, 2))));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        // Seeks
+        // Before first
+        assert_eq!(dup_cursor.seek(key(0)), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        assert_eq!(dup_cursor.seek_exact(key(0)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(0), subkey(0)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        // First
+        assert_eq!(dup_cursor.seek(key(1)), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        assert_eq!(dup_cursor.seek_exact(key(1)), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        // MM: This is wrong and should be contained in the cursor rather than dealt with in the
+        // business logic!
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(1), subkey(0)), Ok(Some(entry(1, 1, 0))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(1), subkey(1)), Ok(Some(entry(1, 1, 0))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 1, 0))));
+        assert_eq!(dup_cursor.prev(), Ok(None));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(1), subkey(2)), Ok(Some(entry(1, 2, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(1, 2, 1))));
+
+        // After first == middle == before last
+        assert_eq!(dup_cursor.seek(key(2)), Ok(Some(pair(2, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
+
+        assert_eq!(dup_cursor.seek_exact(key(2)), Ok(Some(pair(2, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(2), subkey(0)), Ok(Some(entry(2, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(2), subkey(1)), Ok(Some(entry(2, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(2), subkey(3)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+
+        // Missing in the middle
+        assert_eq!(dup_cursor.seek(key(4)), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(5, 1, 2))));
+
+        assert_eq!(dup_cursor.seek_exact(key(4)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(5, 1, 2))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(4), subkey(0)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+
+        // Last
+        assert_eq!(dup_cursor.seek(key(5)), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(5, 1, 2))));
+
+        assert_eq!(dup_cursor.seek_exact(key(5)), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(5, 1, 2))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(5), subkey(0)), Ok(Some(entry(5, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(5), subkey(1)), Ok(Some(entry(5, 1, 1))));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(5), subkey(2)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        // After last
+        assert_eq!(dup_cursor.seek(key(6)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(5, 1, 2))));
+
+        assert_eq!(dup_cursor.seek(key(6)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(5, 1, 2))));
+
+        assert_eq!(dup_cursor.seek_by_key_subkey(key(6), subkey(0)), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+        assert_eq!(dup_cursor.next(), Ok(None));
+        assert_eq!(dup_cursor.prev(), Ok(Some(pair(5, 1, 2))));
+
+        // next_no_dup
+        macro_rules! check_next_no_dup {
+            ($r:expr) => {
+                assert_eq!(dup_cursor.next_no_dup(), $r);
+                assert_eq!(dup_cursor.current(), $r);
+            };
+        }
+
+        assert_eq!(dup_cursor.first(), Ok(Some(pair(1, 1, 0))));
+        check_next_no_dup!(Ok(Some(pair(2, 1, 1))));
+        check_next_no_dup!(Ok(Some(pair(3, 2, 1))));
+        check_next_no_dup!(Ok(Some(pair(5, 1, 1))));
+        check_next_no_dup!(Ok(None));
+
+        // next_dup
+        macro_rules! check_next_dup {
+            ($r:expr) => {
+                assert_eq!(dup_cursor.next_dup(), $r);
+                assert_eq!(dup_cursor.current(), $r);
+            };
+        }
+
+        assert_eq!(dup_cursor.first(), Ok(Some(pair(1, 1, 0))));
+        check_next_dup!(Ok(Some(pair(1, 1, 0))));
+        check_next_dup!(Ok(Some(pair(1, 1, 1))));
+        check_next_dup!(Ok(Some(pair(1, 2, 1))));
+        // Weird
+        assert_eq!(dup_cursor.next_dup(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+        // check_next_dup!(Ok(Some(pair(2, 1, 1))));
+        check_next_dup!(Ok(Some(pair(2, 2, 1))));
+        check_next_dup!(Ok(Some(pair(2, 2, 2))));
+        check_next_dup!(Ok(Some(pair(2, 2, 2))));
+        check_next_dup!(Ok(Some(pair(2, 2, 3))));
+
+        // Weird
+        assert_eq!(dup_cursor.next_dup(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+        // check_next_dup!(Ok(Some(pair(3, 2, 1))));
+        check_next_dup!(Ok(Some(pair(3, 3, 1))));
+        check_next_dup!(Ok(Some(pair(3, 3, 2))));
+        check_next_dup!(Ok(Some(pair(3, 3, 2))));
+        assert_eq!(dup_cursor.next_dup(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+        //check_next_dup!(Ok(Some(pair(5, 1, 1))));
+        check_next_dup!(Ok(Some(pair(5, 1, 2))));
+        check_next_dup!(Ok(None));
+
+        // next_dup_val
+        macro_rules! check_next_dup_val {
+            ($k:expr, $s:expr, $v:expr) => {
+                assert_eq!(dup_cursor.next_dup_val(), Ok(Some(entry($k, $s, $v))));
+                assert_eq!(dup_cursor.current(), Ok(Some(pair($k, $s, $v))));
+            };
+        }
+
+        assert_eq!(dup_cursor.first(), Ok(Some(pair(1, 1, 0))));
+        check_next_dup_val!(1, 1, 0);
+        check_next_dup_val!(1, 1, 1);
+        check_next_dup_val!(1, 2, 1);
+        assert_eq!(dup_cursor.next_dup_val(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+        // check_next_dup!(Ok(Some(pair(2, 1, 1))));
+        check_next_dup_val!(2, 2, 1);
+        check_next_dup_val!(2, 2, 2);
+        check_next_dup_val!(2, 2, 2);
+        check_next_dup_val!(2, 2, 3);
+        assert_eq!(dup_cursor.next_dup_val(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+        // check_next_dup!(Ok(Some(pair(3, 2, 1))));
+        check_next_dup_val!(3, 3, 1);
+        check_next_dup_val!(3, 3, 2);
+        check_next_dup_val!(3, 3, 2);
+        assert_eq!(dup_cursor.next_dup_val(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+        //check_next_dup!(Ok(Some(pair(5, 1, 1))));
+        check_next_dup_val!(5, 1, 2);
+        assert_eq!(dup_cursor.next_dup_val(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        assert_eq!(
+            dup_cursor.walk_dup(None, None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 1, 0), pair(1, 1, 0), pair(1, 1, 1), pair(1, 2, 1)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+
+        assert_eq!(
+            DupWalker { cursor: &mut dup_cursor, start: None }.collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                /* skipped pair(2, 1, 1), */ pair(2, 2, 1),
+                pair(2, 2, 2),
+                pair(2, 2, 2),
+                pair(2, 2, 3)
+            ])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+
+        assert_eq!(
+            DupWalker { cursor: &mut dup_cursor, start: None }.collect::<Result<Vec<_>, _>>(),
+            Ok(vec![/*pair(3, 2, 1),*/ pair(3, 3, 1), pair(3, 3, 2), pair(3, 3, 2)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+
+        assert_eq!(
+            DupWalker { cursor: &mut dup_cursor, start: None }.collect::<Result<Vec<_>, _>>(),
+            Ok(vec![/*pair(5, 1, 1), */ pair(5, 1, 2)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        assert_eq!(
+            DupWalker { cursor: &mut dup_cursor, start: None }.collect::<Result<Vec<_>, _>>(),
+            Ok(vec![])
+        );
+
+        // dup walker from key
+        // TODO: probably wrong
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(0)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![
+                /* skipped (wrong) pair(1, 1, 0),*/ pair(1, 1, 0),
+                pair(1, 1, 1),
+                pair(1, 2, 1)
+            ])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(1)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 1, 0), pair(1, 1, 0), pair(1, 1, 1), pair(1, 2, 1)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 1, 1))));
+
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(2)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(2, 1, 1), pair(2, 2, 1), pair(2, 2, 2), pair(2, 2, 2), pair(2, 2, 3)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(3, 2, 1))));
+
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(3)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(3, 2, 1), pair(3, 3, 1), pair(3, 3, 2), pair(3, 3, 2)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(4)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![/*pair(5, 1, 1),*/ pair(5, 1, 2)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(5)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(5, 1, 1), pair(5, 1, 2)])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        assert_eq!(
+            dup_cursor.walk_dup(Some(key(6)), None).unwrap().collect::<Result<Vec<_>, _>>(),
+            Ok(vec![])
+        );
+        assert_eq!(dup_cursor.current(), Ok(None));
+
+        // TODO: walk dup with subkey
+        // maybe walk range, walk back (tested elsewhere)
+    }
+
+    #[test]
+    fn db_dup_cursor_delete() {
+        let db: Arc<DatabaseEnv> = create_test_db(DatabaseEnvKind::RW);
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+
+        let key = |k: u8| Address::with_last_byte(k);
+        let subkey = |sk: u8| B256::with_last_byte(sk);
+        let entry = |k: u8, sk: u8, v_add: u8| StorageEntry {
+            key: subkey(sk),
+            value: U256::from(k * 10 + sk + v_add),
+        };
+        let pair = |k: u8, sk: u8, v_add: u8| (key(k), entry(k, sk, v_add));
+
+        let new_setup_cursor = || {
+            tx.clear::<PlainStorageState>().unwrap();
+            let mut dup_cursor = tx.cursor_dup_write::<PlainStorageState>().unwrap();
+
+            dup_cursor.upsert(key(2), entry(2, 2, 1)).expect(ERROR_UPSERT);
+            dup_cursor.upsert(key(1), entry(1, 2, 1)).expect(ERROR_UPSERT);
+            dup_cursor.upsert(key(3), entry(3, 2, 1)).expect(ERROR_UPSERT);
+            dup_cursor.upsert(key(2), entry(2, 1, 1)).expect(ERROR_UPSERT); // middle-front
+            dup_cursor.upsert(key(1), entry(1, 1, 1)).expect(ERROR_UPSERT); // front-front
+            dup_cursor.upsert(key(3), entry(3, 3, 1)).expect(ERROR_UPSERT); // back-back
+            dup_cursor.upsert(key(2), entry(2, 2, 3)).expect(ERROR_UPSERT); // middle-back
+            dup_cursor.upsert(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-middle
+            dup_cursor.upsert(key(1), entry(1, 1, 0)).expect(ERROR_UPSERT); // front-front
+            dup_cursor.upsert(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+            dup_cursor.upsert(key(2), entry(2, 2, 2)).expect(ERROR_UPSERT); // middle-back
+            dup_cursor.upsert(key(1), entry(1, 1, 0)).expect(ERROR_UPSERT); // front-front
+            dup_cursor.upsert(key(3), entry(3, 3, 2)).expect(ERROR_UPSERT); // back-back
+
+            assert_eq!(
+                dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
+                Ok(vec![
+                    pair(1, 1, 0),
+                    pair(1, 1, 0),
+                    pair(1, 1, 1),
+                    pair(1, 2, 1),
+                    pair(2, 1, 1),
+                    pair(2, 2, 1),
+                    pair(2, 2, 2),
+                    pair(2, 2, 2),
+                    pair(2, 2, 3),
+                    pair(3, 2, 1),
+                    pair(3, 3, 1),
+                    pair(3, 3, 2),
+                    pair(3, 3, 2)
+                ])
+            );
+            dup_cursor
+        };
+
+        let dup_cursor = new_setup_cursor();
+
+        // delete_current, delete_current_duplicates, walker.delete_current, reverse
+        // walker.delete_current, dup_walker.delete current, range walker.delete current (before,
+        // in, past range)
     }
 
     #[test]

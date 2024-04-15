@@ -274,7 +274,6 @@ mod tests {
                         .checkpoint
                         .and_then(|checkpoint| checkpoint.storage_hashing_stage_checkpoint())
                         .unwrap_or_default();
-                    let exact_total = runner.db.table::<tables::PlainStorageState>().unwrap().len() as u64;
                     assert_matches!(checkpoint.storage_hashing_stage_checkpoint(), Some(StorageHashingCheckpoint {
                         progress: EntitiesCheckpoint {
                             processed,
@@ -282,7 +281,7 @@ mod tests {
                         },
                         ..
                     }) if processed == previous_checkpoint.progress.processed + 1 &&
-                        total < exact_total+200 && total > exact_total-200);
+                        total == runner.db.table::<tables::PlainStorageState>().unwrap().len() as u64);
 
                     // Continue from checkpoint
                     input.checkpoint = Some(checkpoint);
@@ -343,7 +342,6 @@ mod tests {
             })
             .unwrap();
 
-        let exact_total = runner.db.table::<tables::PlainStorageState>().unwrap().len() as u64;
         assert_matches!(
             result,
             Ok(ExecOutput {
@@ -364,7 +362,7 @@ mod tests {
                 },
                 done: false
             }) if address == progress_address && storage == progress_key &&
-                total < exact_total+200 && total > exact_total-200
+                total == runner.db.table::<tables::PlainStorageState>().unwrap().len() as u64
         );
         assert_eq!(runner.db.table::<tables::HashedStorages>().unwrap().len(), 500);
 

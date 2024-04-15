@@ -131,7 +131,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr, false))
         }
     }
 
@@ -148,7 +148,11 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
+            Ok(Cursor::new(
+                escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts),
+                &*raw_self_ptr,
+                false,
+            ))
         }
     }
 
@@ -285,7 +289,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr, true))
         }
     }
 
@@ -302,7 +306,11 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
+            Ok(Cursor::new(
+                escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts),
+                &*raw_self_ptr,
+                true,
+            ))
         }
     }
 }

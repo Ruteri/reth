@@ -41,6 +41,7 @@ pub struct Cursor<'itx, 'it, T: Table> {
     >,
     pub tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
     pub state: CursorIt,
+    pub dup_mode: bool,
     table_type: std::marker::PhantomData<T>,
 }
 
@@ -51,8 +52,9 @@ impl<'itx, 'it: 'itx, T: Table> Cursor<'itx, 'it, T> {
             rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         >,
         tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
+        dup_mode: bool,
     ) -> Cursor<'itx, 'it, T> {
-        Self { iter, tx, state: CursorIt::Start, table_type: std::marker::PhantomData }
+        Self { iter, tx, state: CursorIt::Start, dup_mode, table_type: std::marker::PhantomData }
     }
 }
 
@@ -97,7 +99,6 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
     }
 
     fn next(&mut self) -> PairResult<T> {
-        println!("N {:?} {:?}", &self.state, self.iter.item());
         match self.state {
             CursorIt::Start => self.first(),
             CursorIt::End => match self.iter.item() {
@@ -134,7 +135,6 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
     }
 
     fn prev(&mut self) -> PairResult<T> {
-        println!("P {:?} {:?}", &self.state, self.iter.item());
         match self.state {
             CursorIt::Start => self.last(),
             CursorIt::End => {
@@ -559,7 +559,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
                             self.state = CursorIt::End;
                         }
                         Some(el) => {
-                            if T::TABLE.is_dupsort() {
+                            if self.dup_mode {
                                 self.state = CursorIt::Iterating;
                                 if T::unformat_key(el.0.to_vec()) != T::unformat_key(key) {
                                     self.state = CursorIt::End;

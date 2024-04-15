@@ -233,23 +233,23 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
                 }
             }
         } else {
-            let composite_key =
-                T::format_key(key, &_value.expect("value not set for dupsort delete"));
+            let value = _value.expect("value not set for dupsort delete");
+            let composite_key = T::format_key(key, &value);
             it.seek(&composite_key);
 
-            let found = it
-                .item()
-                .filter(|el| unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key)
-                .is_some();
+            let value = value.compress();
 
             while let Some(el) = it
                 .item()
                 .filter(|el| unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key)
             {
-                let _ = tx.delete_cf(cf_handle, el.0);
-                it.seek(&composite_key);
+                if el.1 == value.as_ref() {
+                    let _ = tx.delete_cf(cf_handle, el.0);
+                    return Ok(true);
+                }
+                it.next();
             }
-            Ok(found)
+            Ok(false)
         }
     }
 

@@ -118,6 +118,11 @@ pub trait DbCursorRW<T: Table> {
 
     /// Delete current value that cursor points to
     fn delete_current(&mut self) -> Result<(), DatabaseError>;
+
+    /// Delete current value that cursor points to
+    fn delete_current_reverse(&mut self) -> Result<(), DatabaseError> {
+        self.delete_current()
+    }
 }
 
 /// Read Write Cursor over DupSorted table.
@@ -181,8 +186,8 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> Walker<'cursor, T, CURSOR> {
 impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> Walker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
+        self.start.take();
         self.cursor.delete_current()?;
-        self.cursor.prev()?;
         Ok(())
     }
 }
@@ -225,7 +230,9 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR>
 impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> ReverseWalker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
-        self.cursor.delete_current()
+        self.start.take();
+        self.cursor.delete_current_reverse()?;
+        Ok(())
     }
 }
 
@@ -323,8 +330,8 @@ impl<'cursor, T: Table, CURSOR: DbCursorRO<T>> RangeWalker<'cursor, T, CURSOR> {
 impl<'cursor, T: Table, CURSOR: DbCursorRW<T> + DbCursorRO<T>> RangeWalker<'cursor, T, CURSOR> {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
+        self.start.take();
         self.cursor.delete_current()?;
-        self.cursor.prev()?;
         Ok(())
     }
 }
@@ -359,8 +366,8 @@ impl<'cursor, T: DupSort, CURSOR: DbCursorRO<T> + DbCursorRW<T> + DbDupCursorRO<
 {
     /// Delete current item that walker points to.
     pub fn delete_current(&mut self) -> Result<(), DatabaseError> {
+        self.start.take();
         self.cursor.delete_current()?;
-        self.cursor.prev()?;
         Ok(())
     }
 }

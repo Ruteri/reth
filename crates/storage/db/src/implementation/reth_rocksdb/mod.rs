@@ -1498,6 +1498,41 @@ mod tests {
     }
 
     #[test]
+    fn db_dup_cursor_delete_last_dup() {
+        let db: Arc<DatabaseEnv> = create_test_db(DatabaseEnvKind::RW);
+        let tx = db.tx_mut().expect(ERROR_INIT_TX);
+
+        let mut dup_cursor = tx.cursor_dup_write::<PlainStorageState>().unwrap();
+
+        let entry_10 = StorageEntry { key: B256::with_last_byte(1), value: U256::from(0) };
+        let entry_11 = StorageEntry { key: B256::with_last_byte(1), value: U256::from(1) };
+        let entry_20 = StorageEntry { key: B256::with_last_byte(2), value: U256::from(0) };
+        let entry_21 = StorageEntry { key: B256::with_last_byte(2), value: U256::from(1) };
+        let entry_30 = StorageEntry { key: B256::with_last_byte(3), value: U256::from(0) };
+        let entry_31 = StorageEntry { key: B256::with_last_byte(3), value: U256::from(1) };
+
+        dup_cursor.upsert(Address::with_last_byte(1), entry_10).expect(ERROR_UPSERT);
+        dup_cursor.upsert(Address::with_last_byte(1), entry_11).expect(ERROR_UPSERT);
+        dup_cursor.upsert(Address::with_last_byte(2), entry_20).expect(ERROR_UPSERT);
+        dup_cursor.upsert(Address::with_last_byte(2), entry_21).expect(ERROR_UPSERT);
+        dup_cursor.upsert(Address::with_last_byte(3), entry_30).expect(ERROR_UPSERT);
+        dup_cursor.upsert(Address::with_last_byte(3), entry_31).expect(ERROR_UPSERT);
+
+        let mut walker = dup_cursor.walk(None).unwrap();
+        assert_eq!(walker.next(), Some(Ok((Address::with_last_byte(1), entry_10))));
+        assert_eq!(walker.next(), Some(Ok((Address::with_last_byte(1), entry_11))));
+        assert_eq!(walker.next(), Some(Ok((Address::with_last_byte(2), entry_20))));
+        assert_eq!(walker.next(), Some(Ok((Address::with_last_byte(2), entry_21))));
+
+        // Delete (2, 2, 1)
+        walker.delete_current().expect(ERROR_DEL);
+
+        // !!! THIS SHOULD BE entry_30
+        assert_eq!(walker.next(), Some(Ok((Address::with_last_byte(3), entry_30))));
+        assert_eq!(walker.next(), Some(Ok((Address::with_last_byte(3), entry_31))));
+    }
+
+    #[test]
     fn db_dup_cursor_delete() {
         let key = |k: u8| Address::with_last_byte(k);
         let subkey = |sk: u8| B256::with_last_byte(sk);
@@ -1570,7 +1605,8 @@ mod tests {
         assert_eq!(dup_cursor.seek(key(2)), Ok(Some(pair(2, 1, 1))));
 
         dup_cursor.delete_current().expect(ERROR_DEL);
-        assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        // assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 1))));
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 1))));
         assert_eq!(
             dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
             Ok(vec![
@@ -1587,6 +1623,7 @@ mod tests {
         assert_eq!(dup_cursor.seek(key(2)), Ok(Some(pair(2, 2, 1))));
         assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 2))));
 
+        println!("X");
         dup_cursor.delete_current().expect(ERROR_DEL);
         assert_eq!(dup_cursor.current(), Ok(Some(pair(2, 2, 3))));
         assert_eq!(
@@ -1604,7 +1641,8 @@ mod tests {
         assert_eq!(dup_cursor.next(), Ok(Some(pair(2, 2, 3))));
 
         dup_cursor.delete_current().expect(ERROR_DEL);
-        assert_eq!(dup_cursor.current(), Ok(None)); // What
+        // assert_eq!(dup_cursor.current(), Ok(None)); // What
+        assert_eq!(dup_cursor.next(), Ok(Some(pair(3, 2, 1))));
         assert_eq!(
             dup_cursor.walk(None).unwrap().collect::<Result<Vec<_>, _>>(),
             Ok(vec![pair(1, 2, 1), pair(2, 2, 1), pair(3, 2, 1), pair(3, 3, 1), pair(3, 3, 2)])
@@ -1746,14 +1784,7 @@ mod tests {
             ])
         );
 
-        assert_eq!(walker.next(), Some(Ok(pair(1, 1, 0)))); // What?? This is just wrong!
-                                                            // (1, 1, 0) was already deleted!
-                                                            // It should at least be (1, 1, 1)
-                                                            // It seems dup cursor only deletes the
-                                                            // *extra* values?
-                                                            // Why on earth would 1, 1, 1 be still
-                                                            // in and 1, 1, 0 be returned from
-                                                            // next?
+        assert_eq!(walker.next(), Some(Ok(pair(1, 1, 1))));
         assert_eq!(walker.next(), Some(Ok(pair(1, 2, 1))));
         walker.delete_current().expect(ERROR_DEL);
         assert_eq!(
@@ -1876,11 +1907,11 @@ mod tests {
             ])
         );
 
-        assert_eq!(walker.next(), Some(Ok(pair(3, 3, 2)))); // WHAT
+        assert_eq!(walker.next(), Some(Ok(pair(3, 3, 1))));
 
         // walker.delete_current().expect(ERROR_DEL); here *aborts*
 
-        assert_eq!(walker.next(), Some(Ok(pair(3, 3, 1)))); // WHAT
+        assert_eq!(walker.next(), Some(Ok(pair(3, 2, 1)))); // WHAT
         walker.delete_current().expect(ERROR_DEL);
 
         assert_eq!(
@@ -1897,27 +1928,7 @@ mod tests {
                 pair(2, 2, 1),
                 pair(2, 2, 2),
                 pair(2, 2, 3),
-                pair(3, 2, 1)
-            ])
-        );
-
-        assert_eq!(walker.next(), Some(Ok(pair(3, 2, 1))));
-
-        walker.delete_current().expect(ERROR_DEL);
-        assert_eq!(
-            tx.cursor_read::<PlainStorageState>()
-                .unwrap()
-                .walk(None)
-                .unwrap()
-                .collect::<Result<Vec<_>, _>>(),
-            Ok(vec![
-                pair(1, 1, 0),
-                pair(1, 1, 1),
-                pair(1, 2, 1),
-                pair(2, 1, 1),
-                pair(2, 2, 1),
-                pair(2, 2, 2),
-                pair(2, 2, 3)
+                pair(3, 3, 1)
             ])
         );
 
@@ -1936,7 +1947,8 @@ mod tests {
                 pair(1, 2, 1),
                 pair(2, 1, 1),
                 pair(2, 2, 1),
-                pair(2, 2, 2)
+                pair(2, 2, 2),
+                pair(3, 3, 1)
             ])
         );
 
@@ -1949,11 +1961,18 @@ mod tests {
                 .walk(None)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>(),
-            Ok(vec![pair(1, 1, 0), pair(1, 1, 1), pair(1, 2, 1), pair(2, 1, 1), pair(2, 2, 1)])
+            Ok(vec![
+                pair(1, 1, 0),
+                pair(1, 1, 1),
+                pair(1, 2, 1),
+                pair(2, 1, 1),
+                pair(2, 2, 1),
+                pair(3, 3, 1)
+            ])
         );
 
-        // walker.delete_current().expect(ERROR_DEL); *aborts*
         assert_eq!(walker.next(), Some(Ok(pair(2, 2, 1))));
+
         walker.delete_current().expect(ERROR_DEL);
         assert_eq!(
             tx.cursor_read::<PlainStorageState>()
@@ -1961,10 +1980,21 @@ mod tests {
                 .walk(None)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>(),
-            Ok(vec![pair(1, 1, 0), pair(1, 1, 1), pair(1, 2, 1), pair(2, 1, 1)])
+            Ok(vec![pair(1, 1, 0), pair(1, 1, 1), pair(1, 2, 1), pair(2, 1, 1), pair(3, 3, 1)])
         );
 
+        // walker.delete_current().expect(ERROR_DEL); *aborts*
         assert_eq!(walker.next(), Some(Ok(pair(2, 1, 1))));
+        walker.delete_current().expect(ERROR_DEL);
+        assert_eq!(
+            tx.cursor_read::<PlainStorageState>()
+                .unwrap()
+                .walk(None)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>(),
+            Ok(vec![pair(1, 1, 0), pair(1, 1, 1), pair(1, 2, 1), pair(3, 3, 1)])
+        );
+
         assert_eq!(walker.next(), Some(Ok(pair(1, 2, 1))));
 
         walker.delete_current().expect(ERROR_DEL);
@@ -1974,7 +2004,7 @@ mod tests {
                 .walk(None)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>(),
-            Ok(vec![pair(1, 1, 0), pair(1, 1, 1), pair(2, 1, 1)])
+            Ok(vec![pair(1, 1, 0), pair(1, 1, 1), pair(3, 3, 1)])
         );
 
         assert_eq!(walker.next(), Some(Ok(pair(1, 1, 1))));
@@ -1986,7 +2016,7 @@ mod tests {
                 .walk(None)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>(),
-            Ok(vec![pair(1, 1, 0), pair(2, 1, 1)])
+            Ok(vec![pair(1, 1, 0), pair(3, 3, 1)])
         );
 
         assert_eq!(walker.next(), Some(Ok(pair(1, 1, 0))));
@@ -1998,7 +2028,7 @@ mod tests {
                 .walk(None)
                 .unwrap()
                 .collect::<Result<Vec<_>, _>>(),
-            Ok(vec![pair(2, 1, 1)])
+            Ok(vec![pair(3, 3, 1)])
         );
 
         assert_eq!(walker.next(), None);

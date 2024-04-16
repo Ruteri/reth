@@ -31,6 +31,7 @@ enum CursorIt {
     Start,
     End, // Past last element
     Iterating,
+    Deleted,
 }
 
 /// Cursor that iterates over table
@@ -117,6 +118,10 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
                     }
                 },
             },
+            CursorIt::Deleted => {
+                self.state = CursorIt::Iterating;
+                self.next()
+            }
             CursorIt::Iterating => {
                 self.iter.next();
                 match self.iter.item() {
@@ -158,6 +163,19 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
                     }
                 }
             }
+            CursorIt::Deleted => {
+                self.iter.next();
+                match self.iter.key() {
+                    None => {
+                        self.state = CursorIt::End;
+                        self.last()
+                    }
+                    Some(_) => {
+                        self.state = CursorIt::Iterating;
+                        self.current()
+                    }
+                }
+            }
             CursorIt::Iterating => {
                 self.iter.prev();
                 match self.iter.item() {
@@ -194,6 +212,19 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
         match self.state {
             CursorIt::Start => Ok(None),
             CursorIt::End => Ok(None),
+            CursorIt::Deleted => {
+                self.iter.next();
+                match self.iter.key() {
+                    None => {
+                        self.state = CursorIt::End;
+                        Ok(None)
+                    }
+                    Some(_) => {
+                        self.state = CursorIt::Iterating;
+                        self.current()
+                    }
+                }
+            }
             CursorIt::Iterating => decode_item::<T>(self.iter.item()),
         }
     }
@@ -240,6 +271,10 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         match self.state {
             CursorIt::Start => self.first(),
             CursorIt::End => Ok(None),
+            CursorIt::Deleted => {
+                self.state = CursorIt::Iterating;
+                self.next_dup()
+            }
             CursorIt::Iterating => match self.iter.item() {
                 None => self.next(),
                 Some(prev_item) => {
@@ -264,6 +299,10 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
         match self.state {
             CursorIt::Start => self.first(),
             CursorIt::End => Ok(None),
+            CursorIt::Deleted => {
+                self.state = CursorIt::Iterating;
+                self.next_no_dup()
+            }
             CursorIt::Iterating => {
                 let prev_item = self.iter.item();
                 if prev_item.is_none() {
@@ -537,7 +576,6 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
     }
 
     fn delete_current(&mut self) -> Result<(), DatabaseError> {
-        // TODO: should delete_current delete all duplicates as well?
         match self.state {
             CursorIt::Start => Err(DatabaseError::Read(DatabaseErrorInfo {
                 message: "Deleting from uninitialized cursor".into(),
@@ -545,35 +583,36 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
             })
             .into()),
             CursorIt::End => Ok(()),
+            CursorIt::Deleted => match self.next()? {
+                None => Ok(()),
+                Some(_) => self.delete_current(),
+            },
             CursorIt::Iterating => match self.iter.key().map(|k| k.to_vec()) {
                 None => Ok(()),
                 Some(key) => {
+                    self.state = CursorIt::Deleted;
+
                     let locked_opt_tx = self.tx.inner.lock().unwrap();
                     let tx = locked_opt_tx.as_ref().unwrap();
                     let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
                     let _ = tx.delete_cf(cf_handle, &key);
-                    self.iter.seek(&key);
-                    match self.iter.item() {
-                        None => {
-                            self.state = CursorIt::End;
-                        }
-                        Some(el) => {
-                            if self.dup_mode {
-                                self.state = CursorIt::Iterating;
-                                if T::unformat_key(el.0.to_vec()) != T::unformat_key(key) {
-                                    self.state = CursorIt::End;
-                                    // self.iter.prev();
-                                }
-                            } else {
-                                self.state = CursorIt::Iterating;
-                            }
-                        }
-                    }
-                    Ok(())
+                    return Ok(());
                 }
             },
         }
+    }
+
+    fn delete_current_reverse(&mut self) -> Result<(), DatabaseError> {
+        self.delete_current()?;
+        match self.next()? {
+            None => {
+                self.state = CursorIt::Deleted;
+                self.iter.seek_to_last();
+            }
+            Some(_) => {}
+        }
+        return Ok(());
     }
 }
 
@@ -586,6 +625,10 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
             })
             .into()),
             CursorIt::End => Ok(()),
+            CursorIt::Deleted => {
+                self.next()?;
+                self.delete_current_duplicates()
+            }
             CursorIt::Iterating => {
                 let start_ext_key = self.iter.key().unwrap().to_vec();
                 let current_primary = T::unformat_key(start_ext_key.clone());
@@ -604,18 +647,15 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                     self.iter.next();
                 }
 
+                self.iter.prev();
+
                 let locked_opt_tx = self.tx.inner.lock().unwrap();
                 let tx = locked_opt_tx.as_ref().unwrap();
                 for key in to_delete {
                     let _ = tx.delete_cf(cf_handle, key);
                 }
 
-                let _ = self.iter.seek(current_primary.encode().as_ref());
-                if self.iter.valid() {
-                    self.state = CursorIt::Iterating;
-                } else {
-                    self.state = CursorIt::End;
-                }
+                self.state = CursorIt::Deleted;
 
                 return Ok(());
             }
@@ -653,7 +693,9 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                     max_extend_composite_key::<T>(composite_key_to_insert.clone());
                 self.iter.seek_for_prev(&ext_key);
                 match self.iter.item() {
-                    None => self.upsert(_key, _value), // weird
+                    None => {
+                        self.upsert(_key, _value) // weird
+                    }
                     Some(el) => {
                         let value_to_insert: Vec<u8> = _value.compress().into();
                         if el.1 > value_to_insert.as_slice() {

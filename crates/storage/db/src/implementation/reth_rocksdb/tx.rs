@@ -217,7 +217,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         key: T::Key,
         _value: Option<T::Value>,
     ) -> Result<bool, DatabaseError> {
-        // println!("deleting {:?}.{:?} {:02x?}", T::NAME, &key, &_value);
+        // println!("deleting {:?}.{:02x?} {:02x?}", T::NAME, &key, &_value);
         let locked_opt_tx = self.inner.lock().unwrap();
         let tx = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();

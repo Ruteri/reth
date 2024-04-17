@@ -42,7 +42,6 @@ pub struct Cursor<'itx, 'it, T: Table> {
     >,
     pub tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
     pub state: CursorIt,
-    pub dup_mode: bool,
     table_type: std::marker::PhantomData<T>,
 }
 
@@ -53,9 +52,8 @@ impl<'itx, 'it: 'itx, T: Table> Cursor<'itx, 'it, T> {
             rocksdb::Transaction<'_, rocksdb::TransactionDB>,
         >,
         tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
-        dup_mode: bool,
     ) -> Cursor<'itx, 'it, T> {
-        Self { iter, tx, state: CursorIt::Start, dup_mode, table_type: std::marker::PhantomData }
+        Self { iter, tx, state: CursorIt::Start, table_type: std::marker::PhantomData }
     }
 }
 
@@ -84,8 +82,8 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
         Ok(self.seek(_key.clone())?.filter(|el| el.0 == _key))
     }
 
-    fn seek(&mut self, _key: T::Key) -> PairResult<T> {
-        let encoded_key = _key.clone().encode();
+    fn seek(&mut self, key: T::Key) -> PairResult<T> {
+        let encoded_key = key.encode();
         self.iter.seek(encoded_key.as_ref());
         match self.iter.item() {
             None => {
@@ -142,27 +140,24 @@ impl<T: Table> DbCursorRO<T> for Cursor<'_, '_, T> {
     fn prev(&mut self) -> PairResult<T> {
         match self.state {
             CursorIt::Start => self.last(),
-            CursorIt::End => {
-                // TODO: handle the case where end points at a midpoint
-                match self.iter.item() {
-                    None => {
-                        self.iter.seek_to_last();
-                        self.state = CursorIt::Iterating;
-                        self.current()
-                    }
-                    Some(_) => {
-                        self.iter.prev();
-                        self.state = CursorIt::Iterating;
-                        match self.current()? {
-                            None => {
-                                self.state = CursorIt::Start;
-                                Ok(None)
-                            }
-                            Some(el) => Ok(Some(el)),
+            CursorIt::End => match self.iter.item() {
+                None => {
+                    self.iter.seek_to_last();
+                    self.state = CursorIt::Iterating;
+                    self.current()
+                }
+                Some(_) => {
+                    self.iter.prev();
+                    self.state = CursorIt::Iterating;
+                    match self.current()? {
+                        None => {
+                            self.state = CursorIt::Start;
+                            Ok(None)
                         }
+                        Some(el) => Ok(Some(el)),
                     }
                 }
-            }
+            },
             CursorIt::Deleted => {
                 self.iter.next();
                 match self.iter.key() {
@@ -278,7 +273,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             CursorIt::Iterating => match self.iter.item() {
                 None => self.next(),
                 Some(prev_item) => {
-                    let prev_primary = T::unformat_key(prev_item.0.to_vec());
+                    let prev_primary = T::unformat_key(prev_item.0);
                     match self.next()? {
                         None => Ok(None),
                         Some(el) => {
@@ -312,7 +307,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
                 let prev_item_key = prev_item.unwrap().0.to_vec();
 
                 let mut prev_primary_plus_one: Vec<u8> =
-                    T::unformat_key(prev_item_key.clone()).encode().into();
+                    T::unformat_key(prev_item_key.as_slice()).encode().into();
                 for i in (1..prev_primary_plus_one.len()).rev() {
                     if prev_primary_plus_one[i] != u8::max_value() {
                         prev_primary_plus_one[i] = prev_primary_plus_one[i] + 1;
@@ -322,17 +317,14 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
                     }
                 }
 
-                self.iter.seek(prev_primary_plus_one.to_vec());
+                self.iter.seek(prev_primary_plus_one.as_slice());
                 match self.iter.item() {
                     None => {
-                        self.iter.seek(&prev_item_key);
+                        self.iter.seek(prev_item_key.as_slice());
                         self.state = CursorIt::Iterating;
                         Ok(None)
                     }
-                    Some(el) => {
-                        self.state = CursorIt::Iterating;
-                        decode_item::<T>(Some(el))
-                    }
+                    Some(el) => decode_item::<T>(Some(el)),
                 }
             }
         }
@@ -359,8 +351,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
             }
             Some(el) => {
                 self.state = CursorIt::Iterating;
-                if T::unformat_key(el.0.to_vec()) == _key {
-                    // TODO: why does this not include the subkey?
+                if T::unformat_key(el.0) == _key {
                     decode_value::<T>(el.1)
                 } else {
                     Ok(None)
@@ -412,7 +403,7 @@ impl<T: DupSort> DbDupCursorRO<T> for Cursor<'_, '_, T> {
                                     .into())
                                 }
                                 Some(el) => {
-                                    if T::unformat_key(el.0.to_vec()) != key {
+                                    if T::unformat_key(el.0) != key {
                                         Err(DatabaseError::Read(DatabaseErrorInfo {
                                             message: "MissingStart".into(),
                                             code: 1,
@@ -630,18 +621,16 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                 self.delete_current_duplicates()
             }
             CursorIt::Iterating => {
-                let start_ext_key = self.iter.key().unwrap().to_vec();
-                let current_primary = T::unformat_key(start_ext_key.clone());
+                let current_primary = T::unformat_key(self.iter.key().unwrap());
+
+                // We can position with prev() first instead of a seek
                 self.iter.seek(current_primary.clone().encode().as_ref());
 
                 let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
                 let mut to_delete: Vec<Vec<u8>> = Vec::new();
-                while let Some(key) = self
-                    .iter
-                    .key()
-                    .map(|k| k.to_vec())
-                    .filter(|k| T::unformat_key(k.to_owned()) == current_primary)
+                while let Some(key) =
+                    self.iter.key().filter(|k| T::unformat_key(k) == current_primary)
                 {
                     to_delete.push(key.to_owned());
                     self.iter.next();
@@ -670,15 +659,16 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
         match self.iter.item() {
             None => self.upsert(_key, _value),
             Some(el) => {
-                if T::unformat_key(el.0.to_vec()) != _key {
+                if T::unformat_key(el.0) != _key {
                     return self.upsert(_key, _value);
                 }
 
-                if unformat_extended_composite_key::<T>(el.0.to_vec()) < composite_key_to_insert {
+                let el_composite_key = unformat_extended_composite_key::<T>(el.0.to_vec());
+                if el_composite_key < composite_key_to_insert {
                     return self.upsert(_key, _value);
                 }
 
-                if unformat_extended_composite_key::<T>(el.0.to_vec()) > composite_key_to_insert {
+                if el_composite_key > composite_key_to_insert {
                     return Err(DatabaseWriteError {
                         info: DatabaseErrorInfo { message: "KeyMismatch".into(), code: 1 },
                         operation: DatabaseWriteOperation::CursorAppendDup,
@@ -731,7 +721,7 @@ where
     match res {
         None => Ok(None),
         Some(el) => {
-            let key = T::unformat_key(el.0.to_vec());
+            let key = T::unformat_key(el.0);
             let value = decode_one::<T>(Cow::Owned(el.1.to_vec())).map_err(|e| {
                 DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 })
             })?;

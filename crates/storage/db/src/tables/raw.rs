@@ -22,7 +22,7 @@ impl<T: Table> KeyFormat<<RawTable<T> as Table>::Key, <RawTable<T> as Table>::Va
     fn format_key(k: <RawTable<T> as Table>::Key, _v: &<RawTable<T> as Table>::Value) -> Vec<u8> {
         k.encode().into()
     }
-    fn unformat_key(raw_key: Vec<u8>) -> <RawTable<T> as Table>::Key {
+    fn unformat_key(raw_key: &[u8]) -> <RawTable<T> as Table>::Key {
         <RawTable<T> as Table>::Key::decode(raw_key).unwrap()
     }
 }
@@ -61,7 +61,7 @@ impl<T: DupSort> KeyFormat<<RawDupSort<T> as Table>::Key, <RawDupSort<T> as Tabl
     fn format_key(k: <RawTable<T> as Table>::Key, v: &<RawDupSort<T> as Table>::Value) -> Vec<u8> {
         <T as KeyFormat<T::Key, T::Value>>::format_key(k.key().unwrap(), &v.value().unwrap())
     }
-    fn unformat_key(raw_key: Vec<u8>) -> <RawTable<T> as Table>::Key {
+    fn unformat_key(raw_key: &[u8]) -> <RawTable<T> as Table>::Key {
         <RawTable<T> as Table>::Key::decode(raw_key).unwrap()
     }
 }

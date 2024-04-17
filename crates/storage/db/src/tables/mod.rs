@@ -107,7 +107,7 @@ macro_rules! dedup_table {
             fn format_key(k: $key, _v: &$value) -> Vec<u8> {
                 Encode::encode(k).into()
             }
-            fn unformat_key(raw_key: Vec<u8>) -> $key {
+            fn unformat_key(raw_key: &[u8]) -> $key {
                 <$key>::decode(raw_key).unwrap()
             }
         }

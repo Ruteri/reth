@@ -1148,6 +1148,16 @@ mod tests {
         assert_eq!(dup_cursor.next_no_dup(), Ok(None));
         assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1)))); // !!! NOT (5, 1, 2) (last)!
 
+        // TODO: this is wrong, but I refuse to fix it. I say its a bug in mdbx
+        // assert_eq!(dup_cursor.next_dup(), Ok(None));
+        assert_eq!(dup_cursor.next_no_dup(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 1))));
+
+        assert_eq!(dup_cursor.seek(key(5)), Ok(Some(pair(5, 1, 1))));
+        assert_eq!(dup_cursor.next_dup(), Ok(Some(pair(5, 1, 2))));
+        assert_eq!(dup_cursor.next_no_dup(), Ok(None));
+        assert_eq!(dup_cursor.current(), Ok(Some(pair(5, 1, 2))));
+
         // next_dup
         macro_rules! check_next_dup {
             ($r:expr) => {

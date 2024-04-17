@@ -21,9 +21,8 @@ impl
         >>::format_composite_key(k, v.key.clone())
     }
 
-    fn unformat_key(raw_key: Vec<u8>) -> <tables::PlainStorageState as Table>::Key {
-        <tables::PlainStorageState as Table>::Key::decode(raw_key.as_slice().split_at(20).0)
-            .unwrap()
+    fn unformat_key(raw_key: &[u8]) -> <tables::PlainStorageState as Table>::Key {
+        <tables::PlainStorageState as Table>::Key::decode(raw_key.split_at(20).0).unwrap()
     }
 }
 
@@ -43,8 +42,8 @@ impl
         >>::format_composite_key(k, v.address.clone())
     }
 
-    fn unformat_key(raw_key: Vec<u8>) -> <tables::AccountChangeSets as Table>::Key {
-        BlockNumber::decode(raw_key.as_slice().split_at(8).0).unwrap()
+    fn unformat_key(raw_key: &[u8]) -> <tables::AccountChangeSets as Table>::Key {
+        BlockNumber::decode(raw_key.split_at(8).0).unwrap()
     }
 }
 
@@ -64,11 +63,8 @@ impl
         >>::format_composite_key(k, v.key.clone())
     }
 
-    fn unformat_key(raw_key: Vec<u8>) -> <tables::StorageChangeSets as Table>::Key {
-        crate::tables::models::accounts::BlockNumberAddress::decode(
-            raw_key.as_slice().split_at(28).0,
-        )
-        .unwrap()
+    fn unformat_key(raw_key: &[u8]) -> <tables::StorageChangeSets as Table>::Key {
+        crate::tables::models::accounts::BlockNumberAddress::decode(raw_key.split_at(28).0).unwrap()
     }
 }
 
@@ -85,8 +81,8 @@ impl KeyFormat<<tables::HashedStorages as Table>::Key, <tables::HashedStorages a
         >>::format_composite_key(k, v.key.clone())
     }
 
-    fn unformat_key(raw_key: Vec<u8>) -> <tables::HashedStorages as Table>::Key {
-        <tables::HashedStorages as Table>::Key::decode(raw_key.as_slice().split_at(32).0).unwrap()
+    fn unformat_key(raw_key: &[u8]) -> <tables::HashedStorages as Table>::Key {
+        <tables::HashedStorages as Table>::Key::decode(raw_key.split_at(32).0).unwrap()
     }
 }
 
@@ -103,8 +99,8 @@ impl KeyFormat<<tables::StoragesTrie as Table>::Key, <tables::StoragesTrie as Ta
         >>::format_composite_key(k, v.nibbles.clone())
     }
 
-    fn unformat_key(raw_key: Vec<u8>) -> <tables::StoragesTrie as Table>::Key {
-        <tables::StoragesTrie as Table>::Key::decode(raw_key.as_slice().split_at(32).0).unwrap()
+    fn unformat_key(raw_key: &[u8]) -> <tables::StoragesTrie as Table>::Key {
+        <tables::StoragesTrie as Table>::Key::decode(raw_key.split_at(32).0).unwrap()
     }
 }
 

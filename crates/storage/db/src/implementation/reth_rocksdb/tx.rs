@@ -91,7 +91,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
             return match it.item() {
                 None => Ok(None),
                 Some(el) => {
-                    if key == T::unformat_key(el.0.to_vec()) {
+                    if key == T::unformat_key(el.0) {
                         reth_rocksdb::cursor::decode_value::<T>(el.1)
                     } else {
                         Ok(None)
@@ -131,7 +131,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr, false))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
         }
     }
 
@@ -148,11 +148,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(
-                escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts),
-                &*raw_self_ptr,
-                false,
-            ))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
         }
     }
 
@@ -289,7 +285,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr, true))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
         }
     }
 
@@ -306,11 +302,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
 
         unsafe {
             let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(
-                escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts),
-                &*raw_self_ptr,
-                true,
-            ))
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
         }
     }
 }

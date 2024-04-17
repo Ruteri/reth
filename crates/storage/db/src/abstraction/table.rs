@@ -72,7 +72,7 @@ impl<T> Value for T where T: Compress + Decompress + Serialize {}
 
 pub trait KeyFormat<K: Key, V: Value> {
     fn format_key(k: K, v: &V) -> Vec<u8>;
-    fn unformat_key(raw_key: Vec<u8>) -> K;
+    fn unformat_key(raw_key: &[u8]) -> K;
 }
 
 pub trait DupKeyFormat<K: Key, SK: Key> {

@@ -135,7 +135,11 @@ pub fn create_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Resu
     {
         Ok(DatabaseEnv::open(rpath, DatabaseEnvKind::RW, args)?)
     }
-    #[cfg(not(feature = "mdbx"))]
+    #[cfg(feature = "rocksdb")]
+    {
+        Ok(DatabaseEnv::open(rpath, DatabaseEnvKind::RW, args.clone())?)
+    }
+    #[cfg(all(not(feature = "rocksdb"), not(feature = "mdbx")))]
     {
         unimplemented!();
     }
@@ -144,25 +148,16 @@ pub fn create_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Resu
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
 pub fn init_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
-    #[cfg(feature = "mdbx")]
-    {
-        let client_version = args.client_version().clone();
-        let db = create_db(path, args)?;
-        db.create_tables()?;
-        db.record_client_version(client_version)?;
-        Ok(db)
-    }
-    #[cfg(feature = "rocksdb")]
-    {
-        let mut db = DatabaseEnv::open(rpath, DatabaseEnvKind::RW, args.clone())?;
-        db.create_tables()?;
-        db.record_client_version(args.client_version().clone())?;
-        return Ok(db);
-    }
     #[cfg(all(not(feature = "mdbx"), not(feature = "mdbx")))]
     {
         unimplemented!();
     }
+
+    let client_version = args.client_version().clone();
+    let mut db = create_db(path, args)?;
+    db.create_tables()?;
+    db.record_client_version(client_version)?;
+    Ok(db)
 }
 
 /// Opens up an existing database. Read only mode. It doesn't create it or create tables if missing.
@@ -174,10 +169,10 @@ pub fn open_db_read_only(path: &Path, args: DatabaseArguments) -> eyre::Result<D
     }
     #[cfg(feature = "rocksdb")]
     {
-        return DatabaseEnv::open(path, DatabaseEnvKind::RO, args)
-            .with_context(|| format!("Could not open database at path: {}", path.display()));
+        DatabaseEnv::open(path, DatabaseEnvKind::RO, args)
+            .with_context(|| format!("Could not open database at path: {}", path.display()))
     }
-    #[cfg(all(not(feature = "mdbx"), not(feature = "mdbx")))]
+    #[cfg(all(not(feature = "rocksdb"), not(feature = "mdbx")))]
     {
         unimplemented!();
     }

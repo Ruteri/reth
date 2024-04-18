@@ -148,7 +148,7 @@ pub fn create_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Resu
 /// Opens up an existing database or creates a new one at the specified path. Creates tables if
 /// necessary. Read/Write mode.
 pub fn init_db<P: AsRef<Path>>(path: P, args: DatabaseArguments) -> eyre::Result<DatabaseEnv> {
-    #[cfg(all(not(feature = "mdbx"), not(feature = "mdbx")))]
+    #[cfg(all(not(feature = "rocksdb"), not(feature = "mdbx")))]
     {
         unimplemented!();
     }
@@ -195,7 +195,7 @@ pub fn open_db(path: &Path, args: DatabaseArguments) -> eyre::Result<DatabaseEnv
         // db.record_client_version(args.client_version().clone())?;
         return Ok(db);
     }
-    #[cfg(all(not(feature = "mdbx"), not(feature = "mdbx")))]
+    #[cfg(all(not(feature = "rocksdb"), not(feature = "mdbx")))]
     {
         unimplemented!();
     }

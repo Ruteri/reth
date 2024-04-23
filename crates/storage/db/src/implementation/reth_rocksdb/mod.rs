@@ -21,7 +21,13 @@ pub struct RO;
 #[non_exhaustive]
 pub struct RW;
 
-use std::{fmt, path::Path, sync::Arc, time::Duration};
+use std::{
+    fmt,
+    ops::Deref,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 pub mod cursor;
 pub mod dups;
@@ -84,9 +90,12 @@ impl DatabaseArguments {
     }
 }
 
+pub type TransactionDB = rocksdb::TransactionDB<rocksdb::MultiThreaded>;
+
 /// Wrapper for the libmdbx environment: [Environment]
 pub struct DatabaseEnv {
-    inner: rocksdb::TransactionDB,
+    inner: TransactionDB,
+    // never accessed concurrently
     /// Cache for metric handles. If `None`, metrics are not recorded.
     metrics: Option<Arc<DatabaseEnvMetrics>>,
 }
@@ -98,33 +107,33 @@ impl fmt::Debug for DatabaseEnv {
 }
 
 impl<'itx> Database for DatabaseEnv {
-    type TX = tx::Tx<'static, rocksdb::TransactionDB>;
-    type TXMut = tx::Tx<'static, rocksdb::TransactionDB>;
+    type TX = tx::Tx<'static, TransactionDB>;
+    type TXMut = tx::Tx<'static, TransactionDB>;
 
     // Database::TX is required to be 'static, and the only way that is possible is with unsafe
     // Requires refactoring Database trait which should never have required 'static transactions
     fn tx(&self) -> Result<Self::TX, DatabaseError> {
-        let static_db = (|| -> &'static rocksdb::TransactionDB {
-            let db = &self.inner as *const rocksdb::TransactionDB;
+        let unsafe_static_db = (|| -> &'static TransactionDB {
+            let db = &self.inner as *const TransactionDB;
             unsafe { &*db }
         })();
 
-        let static_tx: rocksdb::Transaction<'static, rocksdb::TransactionDB> =
-            static_db.transaction();
-        Ok(Tx::new(static_tx, static_db))
+        let static_tx: rocksdb::Transaction<'static, TransactionDB> =
+            unsafe_static_db.transaction();
+        Ok(Tx::new(static_tx, unsafe_static_db))
     }
 
     // Database::TXMut is required to be 'static, and the only way that is possible is with unsafe
     // Requires refactoring Database trait which should never have required 'static transactions
     fn tx_mut(&self) -> Result<Self::TXMut, DatabaseError> {
-        let static_db = (|| -> &'static rocksdb::TransactionDB {
-            let db = &self.inner as *const rocksdb::TransactionDB;
+        let unsafe_static_db = (|| -> &'static TransactionDB {
+            let db = &self.inner as *const TransactionDB;
             unsafe { &*db }
         })();
 
-        let static_tx: rocksdb::Transaction<'static, rocksdb::TransactionDB> =
-            static_db.transaction();
-        Ok(Tx::new(static_tx, static_db))
+        let static_tx: rocksdb::Transaction<'static, TransactionDB> =
+            unsafe_static_db.transaction();
+        Ok(Tx::new(static_tx, unsafe_static_db))
     }
 }
 
@@ -183,9 +192,7 @@ impl DatabaseEnv {
 
         let tx_opts = rocksdb::TransactionDBOptions::default();
 
-        if let Ok(mut inner) =
-            rocksdb::TransactionDB::<rocksdb::SingleThreaded>::open(&opts, &tx_opts, path)
-        {
+        if let Ok(mut inner) = TransactionDB::open(&opts, &tx_opts, path) {
             for table in Tables::ALL {
                 inner.create_cf(table.name(), &rocksdb::Options::default()).map_err(|e| {
                     DatabaseError::CreateTable(DatabaseErrorInfo {
@@ -194,6 +201,7 @@ impl DatabaseEnv {
                     })
                 })?;
             }
+
             return Ok(DatabaseEnv { inner, metrics: None });
         }
 
@@ -205,8 +213,8 @@ impl DatabaseEnv {
             ))
         }
 
-        let inner =
-            rocksdb::TransactionDB::open_cf_descriptors(&opts, &tx_opts, path, cfs).unwrap();
+        let inner = TransactionDB::open_cf_descriptors(&opts, &tx_opts, path, cfs).unwrap();
+
         Ok(DatabaseEnv { inner, metrics: None })
     }
 
@@ -1463,7 +1471,7 @@ mod tests {
         // walk_back
     }
 
-    fn new_setup_cursor(db: &Arc<DatabaseEnv>) -> Tx<'static, rocksdb::TransactionDB> {
+    fn new_setup_cursor(db: &Arc<DatabaseEnv>) -> Tx<'static, TransactionDB> {
         let tx = db.tx_mut().expect(ERROR_INIT_TX);
 
         let key = |k: u8| Address::with_last_byte(k);

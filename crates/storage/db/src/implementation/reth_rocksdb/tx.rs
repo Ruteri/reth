@@ -16,6 +16,7 @@ use reth_interfaces::db::{DatabaseErrorInfo, DatabaseWriteError, DatabaseWriteOp
 
 use std::fmt;
 
+use reth_rocksdb::TransactionDB;
 use rocksdb;
 
 pub struct Tx<'db, DB> {
@@ -23,17 +24,14 @@ pub struct Tx<'db, DB> {
     pub db: &'db DB,
 }
 
-impl fmt::Debug for Tx<'_, rocksdb::TransactionDB> {
+impl fmt::Debug for Tx<'_, TransactionDB> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tx").finish()
     }
 }
 
-impl<'db> Tx<'db, rocksdb::TransactionDB> {
-    pub fn new(
-        inner: rocksdb::Transaction<'db, rocksdb::TransactionDB>,
-        db: &'db rocksdb::TransactionDB,
-    ) -> Self {
+impl<'db> Tx<'db, TransactionDB> {
+    pub fn new(inner: rocksdb::Transaction<'db, TransactionDB>, db: &'db TransactionDB) -> Self {
         Self { inner: Mutex::new(Some(inner)), db }
     }
 
@@ -46,7 +44,7 @@ impl<'db> Tx<'db, rocksdb::TransactionDB> {
         let ext_key = T::format_key(key.clone(), value);
 
         let locked_inner = self.inner.lock().unwrap();
-        let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(cf_handle);
+        let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(&cf_handle);
         it.seek(&ext_key);
         return match it.item() {
             None => Ok(None),
@@ -65,19 +63,21 @@ impl<'db> Tx<'db, rocksdb::TransactionDB> {
 
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        self.inner.lock().unwrap().as_mut().unwrap().put_cf(cf_handle, &_key, _value).map_err(|e| {
-            DatabaseWriteError {
-                info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
-                operation: DatabaseWriteOperation::Put,
-                table_name: T::NAME,
-                key: _key.into(),
-            }
-            .into()
-        })
+        self.inner.lock().unwrap().as_mut().unwrap().put_cf(&cf_handle, &_key, _value).map_err(
+            |e| {
+                DatabaseWriteError {
+                    info: DatabaseErrorInfo { message: e.to_string(), code: 1 },
+                    operation: DatabaseWriteOperation::Put,
+                    table_name: T::NAME,
+                    key: _key.into(),
+                }
+                .into()
+            },
+        )
     }
 }
 
-impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
+impl<'db> DbTx for Tx<'db, TransactionDB> {
     type Cursor<T: Table> = Cursor<'db, 'db, T>;
     type DupCursor<T: DupSort> = Cursor<'db, 'db, T>;
 
@@ -85,7 +85,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let locked_inner = self.inner.lock().unwrap();
         if T::TABLE.is_dupsort() {
             let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
-            let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(cf_handle);
+            let mut it = locked_inner.as_ref().unwrap().raw_iterator_cf(&cf_handle);
             let encoded_key = key.clone().encode();
             it.seek(&encoded_key);
             return match it.item() {
@@ -102,7 +102,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
             locked_inner
                 .as_ref()
                 .unwrap()
-                .get_cf(self.db.cf_handle(&String::from(T::NAME)).unwrap(), key.encode())
+                .get_cf(&self.db.cf_handle(&String::from(T::NAME)).unwrap(), key.encode())
                 .map_err(|e| {
                     DatabaseError::Read(DatabaseErrorInfo { message: e.to_string(), code: 1 })
                 })?
@@ -126,12 +126,12 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let tx_ref = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, TransactionDB>;
         let raw_self_ptr = self as *const Self;
 
         unsafe {
-            let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
+            let escaping_tx_ref: &rocksdb::Transaction<'db, TransactionDB> = &*raw_tx_ptr;
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(&cf_handle), &*raw_self_ptr))
         }
     }
 
@@ -140,15 +140,15 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let tx_ref = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, TransactionDB>;
         let raw_self_ptr = self as *const Self;
 
         let mut opts = rocksdb::ReadOptions::default();
         opts.set_total_order_seek(true);
 
         unsafe {
-            let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
+            let escaping_tx_ref: &rocksdb::Transaction<'db, TransactionDB> = &*raw_tx_ptr;
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(&cf_handle, opts), &*raw_self_ptr))
         }
     }
 
@@ -159,7 +159,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
         let tx_ref = locked_opt_tx.as_ref().unwrap();
 
         let opts = rocksdb::ReadOptions::default();
-        let mut it = tx_ref.raw_iterator_cf_opt(cf_handle, opts);
+        let mut it = tx_ref.raw_iterator_cf_opt(&cf_handle, opts);
         it.seek_to_last();
         if !it.valid() {
             return Ok(0);
@@ -200,7 +200,7 @@ impl<'db> DbTx for Tx<'db, rocksdb::TransactionDB> {
     fn disable_long_read_transaction_safety(&mut self) {}
 }
 
-impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
+impl<'db> DbTxMut for Tx<'db, TransactionDB> {
     type CursorMut<T: Table> = Cursor<'db, 'db, T>;
     type DupCursorMut<T: DupSort> = Cursor<'db, 'db, T>;
 
@@ -218,7 +218,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         let tx = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        let mut it = tx.raw_iterator_cf(cf_handle);
+        let mut it = tx.raw_iterator_cf(&cf_handle);
 
         if !T::TABLE.is_dupsort() {
             let key_to_seek = key.encode().as_ref().to_vec();
@@ -228,7 +228,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
             match it.item().filter(|el| el.0 == key_to_seek) {
                 None => Ok(false),
                 Some(el) => {
-                    let _ = tx.delete_cf(cf_handle, el.0);
+                    let _ = tx.delete_cf(&cf_handle, el.0);
                     Ok(true)
                 }
             }
@@ -244,7 +244,7 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
                 .filter(|el| unformat_extended_composite_key::<T>(el.0.to_vec()) == composite_key)
             {
                 if el.1 == value.as_ref() {
-                    let _ = tx.delete_cf(cf_handle, el.0);
+                    let _ = tx.delete_cf(&cf_handle, el.0);
                     return Ok(true);
                 }
                 it.next();
@@ -254,24 +254,12 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
     }
 
     fn clear<T: Table>(&self) -> Result<(), DatabaseError> {
-        /* TODO: This is extremely inefficient, workaround for the db not being mutable
         self.db.drop_cf(T::NAME).map_err(|e| {
             DatabaseError::Delete(DatabaseErrorInfo { message: e.to_string(), code: 1 })
         })?;
         self.db.create_cf(T::NAME, &rocksdb::Options::default()).map_err(|e| {
             DatabaseError::CreateTable(DatabaseErrorInfo { message: e.to_string(), code: 1 })
-        })
-        */
-
-        let locked_opt_tx = self.inner.lock().unwrap();
-        let tx = locked_opt_tx.as_ref().unwrap();
-        let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
-        let mut it = tx.raw_iterator_cf(cf_handle);
-        it.seek_to_first();
-        while let Some(key) = it.key() {
-            let _ = tx.delete_cf(cf_handle, key);
-            it.seek_to_first();
-        }
+        })?;
         Ok(())
     }
 
@@ -280,12 +268,12 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         let tx_ref = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, TransactionDB>;
         let raw_self_ptr = self as *const Self;
 
         unsafe {
-            let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(cf_handle), &*raw_self_ptr))
+            let escaping_tx_ref: &rocksdb::Transaction<'db, TransactionDB> = &*raw_tx_ptr;
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf(&cf_handle), &*raw_self_ptr))
         }
     }
 
@@ -294,17 +282,17 @@ impl<'db> DbTxMut for Tx<'db, rocksdb::TransactionDB> {
         let tx_ref = locked_opt_tx.as_ref().unwrap();
         let cf_handle = self.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, rocksdb::TransactionDB>;
+        let raw_tx_ptr = tx_ref as *const rocksdb::Transaction<'db, TransactionDB>;
         let raw_self_ptr = self as *const Self;
 
         let mut opts = rocksdb::ReadOptions::default();
         opts.set_total_order_seek(true);
 
         unsafe {
-            let escaping_tx_ref: &rocksdb::Transaction<'db, rocksdb::TransactionDB> = &*raw_tx_ptr;
-            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(cf_handle, opts), &*raw_self_ptr))
+            let escaping_tx_ref: &rocksdb::Transaction<'db, TransactionDB> = &*raw_tx_ptr;
+            Ok(Cursor::new(escaping_tx_ref.raw_iterator_cf_opt(&cf_handle, opts), &*raw_self_ptr))
         }
     }
 }
 
-impl TableImporter for Tx<'_, rocksdb::TransactionDB> {}
+impl TableImporter for Tx<'_, TransactionDB> {}

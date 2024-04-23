@@ -24,6 +24,7 @@ use std::{borrow::Cow, iter::Rev};
 
 use rocksdb;
 
+use reth_rocksdb::TransactionDB;
 use rocksdb::Direction::{self, Forward, Reverse};
 
 #[derive(Debug, Clone)]
@@ -36,11 +37,8 @@ enum CursorIt {
 
 /// Cursor that iterates over table
 pub struct Cursor<'itx, 'it, T: Table> {
-    pub iter: rocksdb::DBRawIteratorWithThreadMode<
-        'it,
-        rocksdb::Transaction<'it, rocksdb::TransactionDB>,
-    >,
-    pub tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
+    pub iter: rocksdb::DBRawIteratorWithThreadMode<'it, rocksdb::Transaction<'it, TransactionDB>>,
+    pub tx: &'itx reth_rocksdb::tx::Tx<'it, TransactionDB>,
     pub state: CursorIt,
     table_type: std::marker::PhantomData<T>,
 }
@@ -49,9 +47,9 @@ impl<'itx, 'it: 'itx, T: Table> Cursor<'itx, 'it, T> {
     pub fn new(
         mut iter: rocksdb::DBRawIteratorWithThreadMode<
             'it,
-            rocksdb::Transaction<'_, rocksdb::TransactionDB>,
+            rocksdb::Transaction<'_, TransactionDB>,
         >,
-        tx: &'itx reth_rocksdb::tx::Tx<'it, rocksdb::TransactionDB>,
+        tx: &'itx reth_rocksdb::tx::Tx<'it, TransactionDB>,
     ) -> Cursor<'itx, 'it, T> {
         Self { iter, tx, state: CursorIt::Start, table_type: std::marker::PhantomData }
     }
@@ -587,7 +585,7 @@ impl<T: Table> DbCursorRW<T> for Cursor<'_, '_, T> {
                     let tx = locked_opt_tx.as_ref().unwrap();
                     let cf_handle = self.tx.db.cf_handle(&String::from(T::NAME)).unwrap();
 
-                    let _ = tx.delete_cf(cf_handle, &key);
+                    let _ = tx.delete_cf(&cf_handle, &key);
                     return Ok(());
                 }
             },
@@ -641,7 +639,7 @@ impl<T: DupSort> DbDupCursorRW<T> for Cursor<'_, '_, T> {
                 let locked_opt_tx = self.tx.inner.lock().unwrap();
                 let tx = locked_opt_tx.as_ref().unwrap();
                 for key in to_delete {
-                    let _ = tx.delete_cf(cf_handle, key);
+                    let _ = tx.delete_cf(&cf_handle, key);
                 }
 
                 self.state = CursorIt::Deleted;

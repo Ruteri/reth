@@ -20,6 +20,7 @@ revm.workspace = true
 
 # alloy
 alloy-rlp.workspace = true
+alloy-trie = { workspace = true, features = ["serde"] }
 
 # tracing
 tracing.workspace = true

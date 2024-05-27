@@ -282,7 +282,7 @@ alloy-primitives = "0.7.0"
 alloy-dyn-abi = "0.7.0"
 alloy-sol-types = "0.7.0"
 alloy-rlp = "0.3.4"
-alloy-trie = "0.3.1"
+alloy-trie = "0.4.1"
 alloy-rpc-types = { git = "https://github.com/alloy-rs/alloy", rev = "39b8695" }
 alloy-rpc-types-anvil = { git = "https://github.com/alloy-rs/alloy", rev = "39b8695" }
 alloy-rpc-types-trace = { git = "https://github.com/alloy-rs/alloy", rev = "39b8695" }

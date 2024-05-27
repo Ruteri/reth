@@ -6,6 +6,7 @@ use crate::{
     walker::TrieWalker,
 };
 use alloy_rlp::{BufMut, Encodable};
+use alloy_trie::proof::ProofRetainer;
 use reth_db::{tables, transaction::DbTx};
 use reth_interfaces::trie::{StateRootError, StorageRootError};
 use reth_primitives::{
@@ -60,8 +61,8 @@ where
         let walker = TrieWalker::new(trie_cursor, prefix_set.freeze());
 
         // Create a hash builder to rebuild the root node since it is not available in the database.
-        let mut hash_builder =
-            HashBuilder::default().with_proof_retainer(Vec::from([target_nibbles]));
+        let mut hash_builder = HashBuilder::default()
+            .with_proof_retainer(ProofRetainer::new(Vec::from([target_nibbles])));
 
         let mut account_rlp = Vec::with_capacity(128);
         let mut account_node_iter = AccountNodeIter::new(walker, hashed_account_cursor);
@@ -115,7 +116,7 @@ where
 
         // short circuit on empty storage
         if hashed_storage_cursor.is_storage_empty(hashed_address)? {
-            return Ok((EMPTY_ROOT_HASH, proofs))
+            return Ok((EMPTY_ROOT_HASH, proofs));
         }
 
         let target_nibbles = proofs.iter().map(|p| p.nibbles.clone()).collect::<Vec<_>>();
@@ -126,7 +127,8 @@ where
         );
         let walker = TrieWalker::new(trie_cursor, prefix_set);
 
-        let mut hash_builder = HashBuilder::default().with_proof_retainer(target_nibbles);
+        let mut hash_builder =
+            HashBuilder::default().with_proof_retainer(ProofRetainer::new(target_nibbles));
         let mut storage_node_iter =
             StorageNodeIter::new(walker, hashed_storage_cursor, hashed_address);
         while let Some(node) = storage_node_iter.try_next()? {
